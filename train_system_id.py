@@ -14,6 +14,7 @@ class QuadrotorModule(nn.Module):
         super(QuadrotorModule, self).__init__()
         self.quad = QuadrotorAutograd()
         self.quad.dt = dt
+        self.quad.mass = 0.039
 
         self.J = nn.Parameter(self.quad.J)
         self.quad.J = self.J
@@ -21,7 +22,7 @@ class QuadrotorModule(nn.Module):
         # self.B0 = nn.Parameter(self.quad.B0)
         # self.quad.B0 = self.B0
 
-        self.kf = 0.9154
+        self.kf = 2.1
         # self.kf = nn.Parameter(torch.tensor([self.kf]))
 
     def forward(self, x):
@@ -29,8 +30,8 @@ class QuadrotorModule(nn.Module):
         state = x[0,0:13]
         # kf = 1e-10
         # print(self.kf, x)
-        # force = self.kf * 1e-11 * torch.pow(x[0, 13:], 2)
-        force = self.kf * x[0, 13:]
+        force = self.kf * 1e-10 * torch.pow(x[0, 13:], 2)
+        # force = self.kf * x[0, 13:]
         # print(force)
         # exit()
         # print(x[0,13:], force)
@@ -129,9 +130,9 @@ def load(filename):
     data_torch[:, 2] = torch.from_numpy(
         data_usd['fixedFrequency']['stateEstimateZ.z']) / 1000.0
     data_torch[:, 3] = torch.from_numpy(
-        data_usd['fixedFrequency']['stateEstimateZ.vx'][::2]) / 1000.0
+        data_usd['fixedFrequency']['stateEstimateZ.vx']) / 1000.0
     data_torch[:, 4] = torch.from_numpy(
-        data_usd['fixedFrequency']['stateEstimateZ.vy'][::2]) / 1000.0
+        data_usd['fixedFrequency']['stateEstimateZ.vy']) / 1000.0
     data_torch[:, 5] = torch.from_numpy(
         data_usd['fixedFrequency']['stateEstimateZ.vz']) / 1000.0
     for t in range(T):
@@ -148,44 +149,44 @@ def load(filename):
     data_torch[:, 12] = torch.from_numpy(
         data_usd['fixedFrequency']['stateEstimateZ.rateYaw']) / 1000.0
 
-    # data_torch[:, 13] = torch.from_numpy(data_usd['fixedFrequency']['rpm.m1'])
-    # data_torch[:, 14] = torch.from_numpy(data_usd['fixedFrequency']['rpm.m2'])
-    # data_torch[:, 15] = torch.from_numpy(data_usd['fixedFrequency']['rpm.m3'])
-    # data_torch[:, 16] = torch.from_numpy(data_usd['fixedFrequency']['rpm.m4'])
-    vbat_norm = data_usd['fixedFrequency']['asc37800.v_mV'] / 1000 / 4.2
+    data_torch[:, 13] = torch.from_numpy(data_usd['fixedFrequency']['rpm.m1'])
+    data_torch[:, 14] = torch.from_numpy(data_usd['fixedFrequency']['rpm.m2'])
+    data_torch[:, 15] = torch.from_numpy(data_usd['fixedFrequency']['rpm.m3'])
+    data_torch[:, 16] = torch.from_numpy(data_usd['fixedFrequency']['rpm.m4'])
+    # vbat_norm = data_usd['fixedFrequency']['asc37800.v_mV'] / 1000 / 4.2
 
-    data_torch[:, 13] = torch.from_numpy(pwm2force(data_usd['fixedFrequency']['pwm.m1_pwm'] / 65536, vbat_norm))
-    data_torch[:, 14] = torch.from_numpy(pwm2force(data_usd['fixedFrequency']['pwm.m2_pwm'] / 65536, vbat_norm))
-    data_torch[:, 15] = torch.from_numpy(pwm2force(data_usd['fixedFrequency']['pwm.m3_pwm'] / 65536, vbat_norm))
-    data_torch[:, 16] = torch.from_numpy(pwm2force(data_usd['fixedFrequency']['pwm.m4_pwm'] / 65536, vbat_norm))
+    # data_torch[:, 13] = torch.from_numpy(pwm2force(data_usd['fixedFrequency']['pwm.m1_pwm'] / 65536, vbat_norm))
+    # data_torch[:, 14] = torch.from_numpy(pwm2force(data_usd['fixedFrequency']['pwm.m2_pwm'] / 65536, vbat_norm))
+    # data_torch[:, 15] = torch.from_numpy(pwm2force(data_usd['fixedFrequency']['pwm.m3_pwm'] / 65536, vbat_norm))
+    # data_torch[:, 16] = torch.from_numpy(pwm2force(data_usd['fixedFrequency']['pwm.m4_pwm'] / 65536, vbat_norm))
 
 
-    import matplotlib.pyplot as plt
-    import rowan
-    import numpy as np
+    # import matplotlib.pyplot as plt
+    # import rowan
+    # import numpy as np
 
-    fig, ax = plt.subplots(4,1)
-    ax[0].plot(np.diff(data_torch[:,12].numpy()))
-    # ax[0].plot(data_torch[:,13].numpy())
-    # ax[1].plot(data_torch[:,14].numpy())
-    # ax[2].plot(data_torch[:,15].numpy())
-    # ax[3].plot(data_torch[:,16].numpy())
-    # rpy = np.degrees(rowan.to_euler(data_torch[:, 6:10].numpy(), 'xyz'))
-    # ax[0].plot(rpy[:,2])
-    # ax[0].plot(data_usd['estPose']['timestamp'], data_usd['estPose']['locSrv.qx'])
-    # ax[0].plot(data_usd['fixedFrequency']['timestamp'], data_torch[:, 6].numpy())
-    # ax[1].plot(data_usd['estPose']['timestamp'], data_usd['estPose']['locSrv.qy'])
-    # ax[1].plot(data_usd['fixedFrequency']['timestamp'], data_torch[:, 7].numpy())
-    # ax[2].plot(data_usd['estPose']['timestamp'], data_usd['estPose']['locSrv.qz'])
-    # ax[2].plot(data_usd['fixedFrequency']['timestamp'], data_torch[:, 8].numpy())
-    # ax[3].plot(data_usd['estPose']['timestamp'], data_usd['estPose']['locSrv.qw'])
-    # ax[3].plot(data_usd['fixedFrequency']['timestamp'], data_torch[:, 9].numpy())
-    # ax.set_xlabel("position [m]")
-    # ax.set_ylabel("velocity [m/s]")
+    # fig, ax = plt.subplots(4,1)
+    # ax[0].plot(np.diff(data_torch[:,12].numpy()))
+    # # ax[0].plot(data_torch[:,13].numpy())
+    # # ax[1].plot(data_torch[:,14].numpy())
+    # # ax[2].plot(data_torch[:,15].numpy())
+    # # ax[3].plot(data_torch[:,16].numpy())
+    # # rpy = np.degrees(rowan.to_euler(data_torch[:, 6:10].numpy(), 'xyz'))
+    # # ax[0].plot(rpy[:,2])
+    # # ax[0].plot(data_usd['estPose']['timestamp'], data_usd['estPose']['locSrv.qx'])
+    # # ax[0].plot(data_usd['fixedFrequency']['timestamp'], data_torch[:, 6].numpy())
+    # # ax[1].plot(data_usd['estPose']['timestamp'], data_usd['estPose']['locSrv.qy'])
+    # # ax[1].plot(data_usd['fixedFrequency']['timestamp'], data_torch[:, 7].numpy())
+    # # ax[2].plot(data_usd['estPose']['timestamp'], data_usd['estPose']['locSrv.qz'])
+    # # ax[2].plot(data_usd['fixedFrequency']['timestamp'], data_torch[:, 8].numpy())
+    # # ax[3].plot(data_usd['estPose']['timestamp'], data_usd['estPose']['locSrv.qw'])
+    # # ax[3].plot(data_usd['fixedFrequency']['timestamp'], data_torch[:, 9].numpy())
+    # # ax.set_xlabel("position [m]")
+    # # ax.set_ylabel("velocity [m/s]")
 
-    plt.show()
+    # plt.show()
 
-    exit()
+    # exit()
 
     # input is 13-dimensional state and action (motor rpm)
     x = data_torch[0:-1]
@@ -198,11 +199,12 @@ def load(filename):
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("file_usd")
+    parser.add_argument("file_usd_train")
+    parser.add_argument("file_usd_test")
     args = parser.parse_args()
 
-    dt, training_data = load(args.file_usd)
-    dt2, test_data = load("data/log07")
+    dt, training_data = load(args.file_usd_train)
+    dt2, test_data = load(args.file_usd_test)
 
     train_dataloader = DataLoader(training_data, batch_size=1, shuffle=True)
     test_dataloader = DataLoader(test_data, batch_size=1)
@@ -213,8 +215,8 @@ if __name__ == '__main__':
     # loss_fn = nn.MSELoss()
     loss_fn = QuadrotorLoss()
 
-    learning_rate = 1e-1
-    epochs = 10
+    learning_rate = 1e-0
+    epochs = 20
 
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
 

@@ -1,0 +1,48 @@
+1     # version
+2048  # buffer size in bytes
+log   # file name
+0     # enable on startup (0/1)
+on:estPose
+locSrv.x
+locSrv.y
+locSrv.z
+locSrv.qx
+locSrv.qy
+locSrv.qz
+locSrv.qw
+on:estGyroscope
+gyro.x
+gyro.y
+gyro.z
+on:estAcceleration
+acc.x
+acc.y
+acc.z
+on:fixedFrequency
+500     # frequency
+1     # mode (0: disabled, 1: synchronous stabilizer, 2: asynchronous)
+stateEstimateZ.x
+stateEstimateZ.y
+stateEstimateZ.z
+stateEstimateZ.vx
+stateEstimateZ.vy
+stateEstimateZ.vz
+stateEstimateZ.ax
+stateEstimateZ.ay
+stateEstimateZ.az
+stateEstimateZ.quat
+stateEstimateZ.rateRoll
+stateEstimateZ.ratePitch
+stateEstimateZ.rateYaw
+rpm.m1
+rpm.m2
+rpm.m3
+rpm.m4
+asc37800.v_mV
+asc37800.i_mA
+asc37800.p_mW
+pwm.m1_pwm
+pwm.m2_pwm
+pwm.m3_pwm
+pwm.m4_pwm
+pm.vbatMV
