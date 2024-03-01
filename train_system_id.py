@@ -14,15 +14,20 @@ class QuadrotorModule(nn.Module):
         super(QuadrotorModule, self).__init__()
         self.quad = QuadrotorAutograd()
         self.quad.dt = dt
-        self.quad.mass = 0.039
 
-        self.J = nn.Parameter(self.quad.J)
-        self.quad.J = self.J
+        # optimize mass
+        self.mass = nn.Parameter(torch.tensor([self.quad.mass]))
+        self.quad.mass = self.mass
+
+
+        # self.J = nn.Parameter(self.quad.J)
+        # self.quad.J = self.J
 
         # self.B0 = nn.Parameter(self.quad.B0)
         # self.quad.B0 = self.B0
 
         self.kf = 2.1
+        self.double()
         # self.kf = nn.Parameter(torch.tensor([self.kf]))
 
     def forward(self, x):
@@ -38,6 +43,11 @@ class QuadrotorModule(nn.Module):
         # exit()
         # print(torch.sum(force))
         next_state = self.quad.step(state, force)
+
+        # print(state)
+        # print(force)
+        # print(next_state)
+        # exit()
         # print(next_state)
         return next_state.reshape((1,13))
 
@@ -62,7 +72,7 @@ class QuadrotorLoss(nn.Module):
         angle_loss = torch.mean(angle_errors)
         omega_loss = torch.nn.functional.mse_loss(input[:,10:13], target[:,10:13])
         # return position_loss + velocity_loss + angle_loss + omega_loss
-        return omega_loss
+        return velocity_loss
 
 def train_loop(dataloader, model, loss_fn, optimizer):
     size = len(dataloader.dataset)
@@ -121,7 +131,7 @@ def load(filename):
     dts = torch.diff(torch.from_numpy(data_usd['fixedFrequency']['timestamp']))
     dt = torch.mean(dts).item() / 1000
 
-    data_torch = torch.empty((T, 13+4))
+    data_torch = torch.empty((T, 13+4), dtype=torch.float64)
 
     data_torch[:, 0] = torch.from_numpy(
         data_usd['fixedFrequency']['stateEstimateZ.x']) / 1000.0
@@ -215,8 +225,8 @@ if __name__ == '__main__':
     # loss_fn = nn.MSELoss()
     loss_fn = QuadrotorLoss()
 
-    learning_rate = 1e-0
-    epochs = 20
+    learning_rate = 1e-3
+    epochs = 10
 
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
 
