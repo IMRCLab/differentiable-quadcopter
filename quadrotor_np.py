@@ -64,7 +64,8 @@ class Quadrotor():
 		# to integrate the dynamics, see
 		# https://www.ashwinnarayan.com/post/how-to-integrate-quaternions/, and
 		# https://arxiv.org/pdf/1604.08139.pdf
-		q_next = rowan.normalize(rowan.calculus.integrate(q, omega, self.dt))
+		omega_global = rowan.rotate(q, omega)
+		q_next = rowan.normalize(rowan.calculus.integrate(q, omega_global, self.dt))
 
 		# mJ = Jw x w + tau_u 
 		omega_next = omega + (self.inv_J * (np.cross(self.J * omega,omega) + tau_u)) * self.dt

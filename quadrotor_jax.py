@@ -102,7 +102,8 @@ class QuadrotorAutograd():
 		# to integrate the dynamics, see
 		# https://www.ashwinnarayan.com/post/how-to-integrate-quaternions/, and
 		# https://arxiv.org/pdf/1604.08139.pdf
-		q_next = qnormalize(qintegrate(q, omega, self.dt))
+		omega_global = qrotate(q, omega)
+		q_next = qnormalize(qintegrate(q, omega_global, self.dt))
 
 		# mJ = Jw x w + tau_u 
 		omega_next = state[10:] + (self.inv_J * (np.cross(self.J * omega,omega) + tau_u)) * self.dt
@@ -115,10 +116,10 @@ if __name__ == '__main__':
 	from jax import jacfwd, jacrev, jit
 	from jax.test_util import check_grads
 
-	# Debug NANs
-	# see https://github.com/google/jax/issues/475
-	from jax.config import config
-	config.update("jax_debug_nans", True)
+	# # Debug NANs
+	# # see https://github.com/google/jax/issues/475
+	# from jax.config import config
+	# config.update("jax_debug_nans", True)
 
 	robot = QuadrotorAutograd()
 

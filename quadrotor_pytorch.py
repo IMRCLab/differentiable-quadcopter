@@ -73,7 +73,7 @@ class QuadrotorAutograd():
 			[-arm, -arm, arm, arm],
 			[-arm, arm, arm, -arm],
 			[-t2t, t2t, -t2t, t2t]
-			])
+			], dtype=torch.float64)
 		self.g = 9.81 # not signed
 
 		# if self.J.shape == (3,3):
@@ -105,7 +105,8 @@ class QuadrotorAutograd():
 		# to integrate the dynamics, see
 		# https://www.ashwinnarayan.com/post/how-to-integrate-quaternions/, and
 		# https://arxiv.org/pdf/1604.08139.pdf
-		q_next = qnormalize(qintegrate(q, omega, self.dt))
+		omega_global = qrotate(q, omega)
+		q_next = qnormalize(qintegrate(q, omega_global, self.dt))
 
 		# mJ = Jw x w + tau_u
 		inv_J = 1 / self.J  # diagonal matrix -> division
@@ -123,7 +124,7 @@ if __name__ == '__main__':
 
 	print(torch.autograd.gradcheck(robot.step, (xbar, ubar)))
 
-	print(torch.autograd.functional.jacobian(robot.step, (xbar, ubar)))
+	# print(torch.autograd.functional.jacobian(robot.step, (xbar, ubar)))
 
 	import timeit
 
