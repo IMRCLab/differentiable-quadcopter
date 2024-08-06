@@ -73,9 +73,11 @@ class QuadrotorLoss(nn.Module):
         # return position_loss + velocity_loss + angle_loss + omega_loss
         return velocity_loss
 
-def train_loop(dataloader, model, loss_fn, optimizer):
+def train_loop(dataloader, model: nn.Module, loss_fn, optimizer):
     size = len(dataloader.dataset)
     training_loss = 0
+
+    model.train()
 
     for batch, (X, y) in enumerate(dataloader):
         # Compute prediction and loss
@@ -97,14 +99,15 @@ def train_loop(dataloader, model, loss_fn, optimizer):
     print(f"Training Error: \n Avg loss: {training_loss:>8f} \n")
 
 
-def test_loop(dataloader, model, loss_fn):
+def test_loop(dataloader, model: nn.Module, loss_fn):
     size = len(dataloader.dataset)
     test_loss = 0
 
-    with torch.no_grad():
-        for X, y in dataloader:
-            pred = model(X)
-            test_loss += loss_fn(pred, y).item()
+    # with torch.no_grad():
+    model.eval()
+    for X, y in dataloader:
+        pred = model(X)
+        test_loss += loss_fn(pred, y).item()
 
     test_loss /= size
     print(f"Test Error: \n Avg loss: {test_loss:>8f} \n")
@@ -215,8 +218,8 @@ if __name__ == '__main__':
     dt, training_data = load(args.file_usd_train)
     dt2, test_data = load(args.file_usd_test)
 
-    train_dataloader = DataLoader(training_data, batch_size=128, shuffle=True)
-    test_dataloader = DataLoader(test_data, batch_size=128)
+    train_dataloader = DataLoader(training_data, batch_size=1, shuffle=True)
+    test_dataloader = DataLoader(test_data, batch_size=1)
 
 
     model = QuadrotorModule(dt)
@@ -224,7 +227,7 @@ if __name__ == '__main__':
     # loss_fn = nn.MSELoss()
     loss_fn = QuadrotorLoss()
 
-    learning_rate = 1e-3
+    learning_rate = 3e-2
     epochs = 10
 
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
