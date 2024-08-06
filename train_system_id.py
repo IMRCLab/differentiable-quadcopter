@@ -20,8 +20,8 @@ class QuadrotorModule(nn.Module):
         self.quad.mass = self.mass
 
 
-        # self.J = nn.Parameter(self.quad.J)
-        # self.quad.J = self.J
+        self.J = nn.Parameter(self.quad.J)
+        self.quad.J = self.J
 
         # self.B0 = nn.Parameter(self.quad.B0)
         # self.quad.B0 = self.B0
@@ -53,7 +53,7 @@ class QuadrotorModule(nn.Module):
 
 # quaternion norm (adopted from rowan)
 def qnorm(q):
-    return torch.linalg.norm(q, axis=-1)
+    return torch.linalg.norm(q, dim=1, keepdim=True)
 
 # quaternion sym distance (adopted from rowan)
 def qsym_distance(p, q):
@@ -70,8 +70,9 @@ class QuadrotorLoss(nn.Module):
         angle_errors = qsym_distance(input[:, 6:10], target[:, 6:10])
         angle_loss = torch.mean(angle_errors)
         omega_loss = torch.nn.functional.mse_loss(input[:,10:13], target[:,10:13])
-        # return position_loss + velocity_loss + angle_loss + omega_loss
-        return velocity_loss
+        return position_loss + velocity_loss + angle_loss + omega_loss
+        # return angle_loss + omega_loss
+        # return velocity_loss
 
 def train_loop(dataloader, model: nn.Module, loss_fn, optimizer):
     size = len(dataloader.dataset)
@@ -218,8 +219,8 @@ if __name__ == '__main__':
     dt, training_data = load(args.file_usd_train)
     dt2, test_data = load(args.file_usd_test)
 
-    train_dataloader = DataLoader(training_data, batch_size=1, shuffle=True)
-    test_dataloader = DataLoader(test_data, batch_size=1)
+    train_dataloader = DataLoader(training_data, batch_size=64, shuffle=True)
+    test_dataloader = DataLoader(test_data, batch_size=64)
 
 
     model = QuadrotorModule(dt)

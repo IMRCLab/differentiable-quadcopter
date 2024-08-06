@@ -56,8 +56,8 @@ class QuadrotorAutograd():
 		self.max_x = -self.min_x
 
 		# parameters (Crazyflie 2.0 quadrotor)
-		# self.mass = 0.034 # true mass in kg
-		self.mass = .5 # kg
+		self.mass = 0.034 # true mass in kg
+		# self.mass = .134 # kg
 		# self.J = np.array([
 		# 	[16.56,0.83,0.71],
 		# 	[0.83,16.66,1.8],
@@ -87,7 +87,7 @@ class QuadrotorAutograd():
 
 	def step(self, state, force):
 		# compute next state
-		q = state[:,:10]
+		q = state[:,6:10]
 		omega = state[:,10:]
 
 		# eta = torch.mv(self.B0, force)
