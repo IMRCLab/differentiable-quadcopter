@@ -31,11 +31,10 @@ class QuadrotorModule(nn.Module):
         # self.kf = nn.Parameter(torch.tensor([self.kf]))
 
     def forward(self, x):
-        # print(x.shape)
-        state = x[0,0:13]
+        state = x[:,0:13]
         # kf = 1e-10
         # print(self.kf, x)
-        force = self.kf * 1e-10 * torch.pow(x[0, 13:], 2)
+        force = self.kf * 1e-10 * torch.pow(x[:,13:], 2)
         # force = self.kf * x[0, 13:]
         # print(force)
         # exit()
@@ -49,7 +48,7 @@ class QuadrotorModule(nn.Module):
         # print(next_state)
         # exit()
         # print(next_state)
-        return next_state.reshape((1,13))
+        return next_state #  .reshape((-1,13))
 
 
 # quaternion norm (adopted from rowan)
@@ -99,7 +98,7 @@ def train_loop(dataloader, model, loss_fn, optimizer):
 
 
 def test_loop(dataloader, model, loss_fn):
-    num_batches = len(dataloader)
+    size = len(dataloader.dataset)
     test_loss = 0
 
     with torch.no_grad():
@@ -107,7 +106,7 @@ def test_loop(dataloader, model, loss_fn):
             pred = model(X)
             test_loss += loss_fn(pred, y).item()
 
-    test_loss /= num_batches
+    test_loss /= size
     print(f"Test Error: \n Avg loss: {test_loss:>8f} \n")
 
 
@@ -216,8 +215,8 @@ if __name__ == '__main__':
     dt, training_data = load(args.file_usd_train)
     dt2, test_data = load(args.file_usd_test)
 
-    train_dataloader = DataLoader(training_data, batch_size=1, shuffle=True)
-    test_dataloader = DataLoader(test_data, batch_size=1)
+    train_dataloader = DataLoader(training_data, batch_size=128, shuffle=True)
+    test_dataloader = DataLoader(test_data, batch_size=128)
 
 
     model = QuadrotorModule(dt)

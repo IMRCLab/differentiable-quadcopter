@@ -2,44 +2,44 @@ import torch
 
 # Quaternion routines adapted from rowan to use autograd
 def qmultiply(q1, q2):
-	return torch.cat((
-		torch.tensor([q1[0] * q2[0] - torch.sum(q1[1:4]*q2[1:4])]),
-		q1[0] * q2[1:4] + q2[0] * q1[1:4] + torch.cross(q1[1:4], q2[1:4])))
+	t1 = torch.mul(q1[:,:1], q2[:,:1]) - torch.sum(torch.mul(q1[:,1:4],q2[:,1:4]), dim=1, keepdim=True)
+	t2 = q1[:,:1] * q2[:,1:4] + q2[:,:1] * q1[:,1:4] + torch.cross(q1[:,1:4], q2[:,1:4], dim=1)
+	return torch.cat((t1, t2), dim=1)
 
 def qconjugate(q):
-	return torch.cat((q[0:1],-q[1:4]))
+	return torch.cat((q[:,0:1],-q[:,1:4]), dim=1)
 
 def qrotate(q, v):
-	quat_v = torch.cat((torch.tensor([0]), v))
-	return qmultiply(q, qmultiply(quat_v, qconjugate(q)))[1:]
+	quat_v = torch.cat((torch.zeros((v.shape[0],1)), v), dim=1)
+	return qmultiply(q, qmultiply(quat_v, qconjugate(q)))[:,1:]
 
 def qexp_regular_norm(q):
-	e = torch.exp(q[0])
-	norm = torch.linalg.norm(q[1:4])
-	result_v = e * q[1:4] / norm * torch.sin(norm)
+	e = torch.exp(q[:,:1])
+	norm = torch.linalg.norm(q[:,1:4], dim=1, keepdim=True)
+	result_v = e * q[:,1:4] / norm * torch.sin(norm)
 	result_w = e * torch.cos(norm)
-	return torch.cat((torch.tensor([result_w]), result_v))
+	return torch.cat((result_w, result_v), dim=1)
 
 def qexp_zero_norm(q):
-	e = torch.exp(q[0])
-	result_v = torch.zeros(3)
+	e = torch.exp(q[:,:1])
+	result_v = torch.zeros((q.shape[0], 3))
 	result_w = e
-	return torch.cat((torch.tensor([result_w]), result_v))
+	return torch.cat((result_w, result_v), dim=1)
 
 
 def qexp(q):
-	if torch.allclose(q[1:4], torch.zeros_like(q[1:4])):
+	if torch.allclose(q[:,1:4], torch.zeros_like(q[:,1:4])):
 		return qexp_zero_norm(q)
 	else:
 		return qexp_regular_norm(q)
 	# return torch.where(torch.allclose(q[1:4], torch.zeros_like(q[1:4])), qexp_zero_norm(q), qexp_regular_norm(q))
 
 def qintegrate(q, v, dt):
-	quat_v = torch.cat((torch.tensor([0]), v*dt/2))
+	quat_v = torch.cat((torch.zeros((v.shape[0],1)), v*dt/2),dim=1)
 	return qmultiply(qexp(quat_v), q)
 
 def qnormalize(q):
-	return q / torch.linalg.norm(q)
+	return q / torch.linalg.norm(q, dim=1, keepdim=True)
 
 
 class QuadrotorAutograd():
@@ -56,7 +56,8 @@ class QuadrotorAutograd():
 		self.max_x = -self.min_x
 
 		# parameters (Crazyflie 2.0 quadrotor)
-		self.mass = 0.034 # kg
+		# self.mass = 0.034 # true mass in kg
+		self.mass = .5 # kg
 		# self.J = np.array([
 		# 	[16.56,0.83,0.71],
 		# 	[0.83,16.66,1.8],
@@ -86,20 +87,22 @@ class QuadrotorAutograd():
 
 	def step(self, state, force):
 		# compute next state
-		q = state[6:10]
-		omega = state[10:]
+		q = state[:,:10]
+		omega = state[:,10:]
 
-		eta = torch.mv(self.B0, force)
+		# eta = torch.mv(self.B0, force)
+		eta = force @ self.B0.T
 		# f_u = torch.tensor([0,0,eta[0]])
-		f_u = torch.cat((torch.tensor([0,0]),eta[0:1]))
+		batch_size = state.shape[0]
+		f_u = torch.cat((torch.zeros((batch_size, 2)),eta[:,0:1]),dim=1)
 		# tau_u = torch.tensor([eta[1],eta[2],eta[3]])
-		tau_u = eta[1:]
+		tau_u = eta[:,1:]
 
 		# dynamics 
 		# dot{p} = v 
-		pos_next = state[0:3] + state[3:6] * self.dt
+		pos_next = state[:,0:3] + state[:,3:6] * self.dt
 		# mv = mg + R f_u 
-		vel_next = state[3:6] + (torch.tensor([0,0,-self.g]) + qrotate(q,f_u) / self.mass) * self.dt
+		vel_next = state[:,3:6] + (torch.tensor([0,0,-self.g]) + qrotate(q,f_u) / self.mass) * self.dt
 
 		# dot{R} = R S(w)
 		# to integrate the dynamics, see
@@ -110,9 +113,9 @@ class QuadrotorAutograd():
 
 		# mJ = Jw x w + tau_u
 		inv_J = 1 / self.J  # diagonal matrix -> division
-		omega_next = state[10:] + (inv_J * (torch.cross(self.J * omega,omega) + tau_u)) * self.dt
+		omega_next = state[:,10:] + (inv_J * (torch.cross(self.J * omega,omega) + tau_u)) * self.dt
 
-		return torch.cat((pos_next, vel_next, q_next, omega_next))
+		return torch.cat((pos_next, vel_next, q_next, omega_next), dim=1)
 
 
 if __name__ == '__main__':
