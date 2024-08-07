@@ -53,7 +53,7 @@ class QuadrotorModule(nn.Module):
 
 # quaternion norm (adopted from rowan)
 def qnorm(q):
-    return torch.linalg.norm(q, dim=1, keepdim=True)
+    return torch.linalg.norm(q, dim=-1, keepdim=True)
 
 # quaternion sym distance (adopted from rowan)
 def qsym_distance(p, q):
@@ -219,7 +219,7 @@ if __name__ == '__main__':
     dt, training_data = load(args.file_usd_train)
     dt2, test_data = load(args.file_usd_test)
 
-    train_dataloader = DataLoader(training_data, batch_size=64, shuffle=True)
+    train_dataloader = DataLoader(training_data, batch_size=128, shuffle=True)
     test_dataloader = DataLoader(test_data, batch_size=64)
 
 
@@ -228,7 +228,7 @@ if __name__ == '__main__':
     # loss_fn = nn.MSELoss()
     loss_fn = QuadrotorLoss()
 
-    learning_rate = 3e-2
+    learning_rate = 1e-3
     epochs = 10
 
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
