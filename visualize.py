@@ -111,7 +111,7 @@ if __name__ == '__main__':
 
 	dt = 0.01
 
-	data = np.load(args.file)
+	data = np.load(args.file, allow_pickle=True)
 	data[:, 6:10] = rowan.normalize(data[:, 6:10])
 	# data[:, 17+6:17+10] = rowan.normalize(data[:, 17+6:17+10])
 
