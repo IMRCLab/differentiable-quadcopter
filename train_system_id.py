@@ -1,4 +1,6 @@
 import argparse
+import re
+import numpy as np
 
 from torch.utils.data.dataset import TensorDataset
 from data import cfusdlog
@@ -209,15 +211,58 @@ def load(filename):
     training_data = TensorDataset(x, y)
     return dt, training_data
 
+def load_csv(file_name):
+    """
+    Loads (simulated) quadrotor data stored in csv file format and creates tensor dataset
+    """
+    data = np.loadtxt(file_name, delimiter=',')
+
+    dts = np.diff(data[:,0])
+    dt = np.mean(dts)
+
+    data_torch = torch.from_numpy(data[:,1:])  # skip the dt column
+    x = data_torch[:-1,:]
+
+    y = data_torch[1:, :13]
+
+    dataset = TensorDataset(x,y)
+    return dt, dataset
+
+def load_dataset(file_name):
+    """
+    Loads a pickled TensorDataset
+    """
+    dataset = torch.load(file_name)
+
+    m = re.search('_([0-9]+)Hz',file_name)
+    if m:
+        hz = float(m.group(1))
+        dt = 1/hz
+    else:
+        dt = 0.01
+
+    return dt, dataset
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("file_usd_train")
-    parser.add_argument("file_usd_test")
+    parser.add_argument("file_train", type=str)
+    parser.add_argument("file_test", type=str)
     args = parser.parse_args()
 
-    dt, training_data = load(args.file_usd_train)
-    dt2, test_data = load(args.file_usd_test)
+    if args.file_train.endswith('.csv'):
+        dt, training_data = load_csv(args.file_train)
+    elif args.file_train.endswith('.pt'):
+        dt, training_data = load_dataset(args.file_train)
+    else:
+        dt, training_data = load(args.file_train)
+    
+    if args.file_test.endswith('.csv'):
+        dt2, test_data = load_csv(args.file_test)
+    elif args.file_test.endswith('.pt'):
+        dt2, test_data = load_dataset(args.file_test)
+    else:
+        dt2, test_data = load(args.file_test)
 
     train_dataloader = DataLoader(training_data, batch_size=128, shuffle=True)
     test_dataloader = DataLoader(test_data, batch_size=64)
@@ -229,7 +274,7 @@ if __name__ == '__main__':
     loss_fn = QuadrotorLoss()
 
     learning_rate = 1e-3
-    epochs = 10
+    epochs = 20
 
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
 
