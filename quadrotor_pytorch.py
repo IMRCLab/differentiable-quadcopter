@@ -124,7 +124,7 @@ class QuadrotorAutograd():
 		# dot{p} = v 
 		pos_next = state[...,:3] + state[...,3:6] * self.dt
 		# mv = mg + R f_u 
-		vel_next = state[...,3:6] + (torch.tensor([0,0,-self.g]) + qrotate(q,f_u) / (self.mass+1e-8)) * self.dt
+		vel_next = state[...,3:6] + (torch.tensor([0,0,-self.g]) + qrotate(q,f_u) / self.mass) * self.dt
 
 		# dot{R} = R S(w)
 		# to integrate the dynamics, see
@@ -132,7 +132,7 @@ class QuadrotorAutograd():
 		# https://arxiv.org/pdf/1604.08139.pdf
 		omega_global = qrotate(q, omega)
 		# omega_global = omega
-		q_next = qintegrate(qnormalize(q), omega_global, self.dt)
+		q_next = qnormalize(qintegrate(q, omega_global, self.dt))
 
 		# mJ = Jw x w + tau_u
 		inv_J = 1 / self.J  # diagonal matrix -> division

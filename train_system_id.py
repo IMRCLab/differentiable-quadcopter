@@ -57,13 +57,6 @@ def qnorm(q):
 def qsym_distance(p, q):
     return torch.minimum(qnorm(p - q), qnorm(p + q))
 
-# def so3_loss(p, q):
-#     # create rotation matrices from p and q
-
-#     # take difference in so3
-
-#     # project 
-
 class QuadrotorLoss(nn.Module):
     def __init__(self):
         super(QuadrotorLoss, self).__init__()
@@ -116,8 +109,8 @@ def test_loop(dataloader, model: nn.Module, loss_fn):
             pred = model(X)
             test_loss += loss_fn(pred, y).item()
 
-        test_loss /= size
-        print(f"Test Error: \n Avg loss: {test_loss:>8f} \n")
+    test_loss /= size
+    print(f"Test Error: \n Avg loss: {test_loss:>8f} \n")
     return test_loss
 
 
@@ -278,7 +271,7 @@ if __name__ == '__main__':
     # loss_fn = nn.MSELoss()
     loss_fn = QuadrotorLoss()
 
-    learning_rate = 1e-1
+    learning_rate = 1e-3
     epochs = 10
     train_losses, test_losses = [], []
 
