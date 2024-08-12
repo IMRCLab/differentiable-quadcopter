@@ -1,6 +1,7 @@
 import argparse
 import re
 import numpy as np
+import matplotlib.pyplot as plt
 
 from torch.utils.data.dataset import TensorDataset
 from data import cfusdlog
@@ -36,7 +37,7 @@ class QuadrotorModule(nn.Module):
         state = x[:,0:13]
         # kf = 1e-10
         # print(self.kf, x)
-        force = self.kf * 1e-10 * torch.pow(x[:,13:], 2)
+        force = self.kf * 1e-10 * torch.pow(x[:,13:], 2)  # motor controls to force
         # force = self.kf * x[0, 13:]
         # print(force)
         # exit()
@@ -45,12 +46,7 @@ class QuadrotorModule(nn.Module):
         # print(torch.sum(force))
         next_state = self.quad.step(state, force)
 
-        # print(state)
-        # print(force)
-        # print(next_state)
-        # exit()
-        # print(next_state)
-        return next_state #  .reshape((-1,13))
+        return next_state
 
 
 # quaternion norm (adopted from rowan)
@@ -60,6 +56,13 @@ def qnorm(q):
 # quaternion sym distance (adopted from rowan)
 def qsym_distance(p, q):
     return torch.minimum(qnorm(p - q), qnorm(p + q))
+
+# def so3_loss(p, q):
+#     # create rotation matrices from p and q
+
+#     # take difference in so3
+
+#     # project 
 
 class QuadrotorLoss(nn.Module):
     def __init__(self):
@@ -72,9 +75,9 @@ class QuadrotorLoss(nn.Module):
         angle_errors = qsym_distance(input[:, 6:10], target[:, 6:10])
         angle_loss = torch.mean(angle_errors)
         omega_loss = torch.nn.functional.mse_loss(input[:,10:13], target[:,10:13])
+        # print(f"position_loss: {position_loss} \tvelocity_loss: {velocity_loss} \tangle_loss: {angle_loss} \tomega_loss: {omega_loss}")
         return position_loss + velocity_loss + angle_loss + omega_loss
-        # return angle_loss + omega_loss
-        # return velocity_loss
+        # return omega_loss
 
 def train_loop(dataloader, model: nn.Module, loss_fn, optimizer):
     size = len(dataloader.dataset)
@@ -100,20 +103,22 @@ def train_loop(dataloader, model: nn.Module, loss_fn, optimizer):
 
     training_loss /= size
     print(f"Training Error: \n Avg loss: {training_loss:>8f} \n")
+    return training_loss
 
 
 def test_loop(dataloader, model: nn.Module, loss_fn):
     size = len(dataloader.dataset)
     test_loss = 0
 
-    # with torch.no_grad():
     model.eval()
-    for X, y in dataloader:
-        pred = model(X)
-        test_loss += loss_fn(pred, y).item()
+    with torch.no_grad():
+        for X, y in dataloader:
+            pred = model(X)
+            test_loss += loss_fn(pred, y).item()
 
-    test_loss /= size
-    print(f"Test Error: \n Avg loss: {test_loss:>8f} \n")
+        test_loss /= size
+        print(f"Test Error: \n Avg loss: {test_loss:>8f} \n")
+    return test_loss
 
 
 # pwm normalized [0-1]; vbat normalized [0-1]
@@ -134,7 +139,7 @@ def load(filename):
     T = len(data_usd['fixedFrequency']['timestamp'])
 
     dts = torch.diff(torch.from_numpy(data_usd['fixedFrequency']['timestamp']))
-    dt = torch.mean(dts).item() / 1000
+    dt = torch.mean(dts).item() / 1000.0
 
     data_torch = torch.empty((T, 13+4), dtype=torch.float64)
 
@@ -264,8 +269,8 @@ if __name__ == '__main__':
     else:
         dt2, test_data = load(args.file_test)
 
-    train_dataloader = DataLoader(training_data, batch_size=128, shuffle=True)
-    test_dataloader = DataLoader(test_data, batch_size=64)
+    train_dataloader = DataLoader(training_data, batch_size=1024, shuffle=True)
+    test_dataloader = DataLoader(test_data, batch_size=1024)
 
 
     model = QuadrotorModule(dt)
@@ -273,18 +278,28 @@ if __name__ == '__main__':
     # loss_fn = nn.MSELoss()
     loss_fn = QuadrotorLoss()
 
-    learning_rate = 1e-3
-    epochs = 20
+    learning_rate = 1e-1
+    epochs = 10
+    train_losses, test_losses = [], []
 
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
 
     for t in range(epochs):
         print(f"Epoch {t+1}\n-------------------------------")
-        train_loop(train_dataloader, model, loss_fn, optimizer)
-        test_loop(test_dataloader, model, loss_fn)
+        train_loss = train_loop(train_dataloader, model, loss_fn, optimizer)
+        test_loss = test_loop(test_dataloader, model, loss_fn)
+        train_losses.append(train_loss)
+        test_losses.append(test_loss)
     print("Done!")
     print(model.state_dict())
 
+    plt.plot(range(epochs), train_losses, label="training error")
+    plt.plot(range(epochs), test_losses, label="test error")
+    plt.xlabel('epoch')
+    plt.ylabel('error')
+    plt.legend()
+    plt.title("Train and test error over epochs")
+    plt.show()
 
 
 
