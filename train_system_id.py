@@ -1,4 +1,7 @@
 import argparse
+import re
+import numpy as np
+import matplotlib.pyplot as plt
 
 from torch.utils.data.dataset import TensorDataset
 from data import cfusdlog
@@ -34,7 +37,7 @@ class QuadrotorModule(nn.Module):
         state = x[:,0:13]
         # kf = 1e-10
         # print(self.kf, x)
-        force = self.kf * 1e-10 * torch.pow(x[:,13:], 2)
+        force = self.kf * 1e-10 * torch.pow(x[:,13:], 2)  # motor controls to force
         # force = self.kf * x[0, 13:]
         # print(force)
         # exit()
@@ -43,12 +46,7 @@ class QuadrotorModule(nn.Module):
         # print(torch.sum(force))
         next_state = self.quad.step(state, force)
 
-        # print(state)
-        # print(force)
-        # print(next_state)
-        # exit()
-        # print(next_state)
-        return next_state #  .reshape((-1,13))
+        return next_state
 
 
 # quaternion norm (adopted from rowan)
@@ -70,9 +68,9 @@ class QuadrotorLoss(nn.Module):
         angle_errors = qsym_distance(input[:, 6:10], target[:, 6:10])
         angle_loss = torch.mean(angle_errors)
         omega_loss = torch.nn.functional.mse_loss(input[:,10:13], target[:,10:13])
+        # print(f"position_loss: {position_loss} \tvelocity_loss: {velocity_loss} \tangle_loss: {angle_loss} \tomega_loss: {omega_loss}")
         return position_loss + velocity_loss + angle_loss + omega_loss
-        # return angle_loss + omega_loss
-        # return velocity_loss
+        # return omega_loss
 
 def train_loop(dataloader, model: nn.Module, loss_fn, optimizer):
     size = len(dataloader.dataset)
@@ -98,20 +96,22 @@ def train_loop(dataloader, model: nn.Module, loss_fn, optimizer):
 
     training_loss /= size
     print(f"Training Error: \n Avg loss: {training_loss:>8f} \n")
+    return training_loss
 
 
 def test_loop(dataloader, model: nn.Module, loss_fn):
     size = len(dataloader.dataset)
     test_loss = 0
 
-    # with torch.no_grad():
     model.eval()
-    for X, y in dataloader:
-        pred = model(X)
-        test_loss += loss_fn(pred, y).item()
+    with torch.no_grad():
+        for X, y in dataloader:
+            pred = model(X)
+            test_loss += loss_fn(pred, y).item()
 
     test_loss /= size
     print(f"Test Error: \n Avg loss: {test_loss:>8f} \n")
+    return test_loss
 
 
 # pwm normalized [0-1]; vbat normalized [0-1]
@@ -132,7 +132,7 @@ def load(filename):
     T = len(data_usd['fixedFrequency']['timestamp'])
 
     dts = torch.diff(torch.from_numpy(data_usd['fixedFrequency']['timestamp']))
-    dt = torch.mean(dts).item() / 1000
+    dt = torch.mean(dts).item() / 1000.0
 
     data_torch = torch.empty((T, 13+4), dtype=torch.float64)
 
@@ -209,18 +209,61 @@ def load(filename):
     training_data = TensorDataset(x, y)
     return dt, training_data
 
+def load_csv(file_name):
+    """
+    Loads (simulated) quadrotor data stored in csv file format and creates tensor dataset
+    """
+    data = np.loadtxt(file_name, delimiter=',')
+
+    dts = np.diff(data[:,0])
+    dt = np.mean(dts)
+
+    data_torch = torch.from_numpy(data[:,1:])  # skip the dt column
+    x = data_torch[:-1,:]
+
+    y = data_torch[1:, :13]
+
+    dataset = TensorDataset(x,y)
+    return dt, dataset
+
+def load_dataset(file_name):
+    """
+    Loads a pickled TensorDataset
+    """
+    dataset = torch.load(file_name)
+
+    m = re.search('_([0-9]+)Hz',file_name)
+    if m:
+        hz = float(m.group(1))
+        dt = 1/hz
+    else:
+        dt = 0.01
+
+    return dt, dataset
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("file_usd_train")
-    parser.add_argument("file_usd_test")
+    parser.add_argument("file_train", type=str)
+    parser.add_argument("file_test", type=str)
     args = parser.parse_args()
 
-    dt, training_data = load(args.file_usd_train)
-    dt2, test_data = load(args.file_usd_test)
+    if args.file_train.endswith('.csv'):
+        dt, training_data = load_csv(args.file_train)
+    elif args.file_train.endswith('.pt'):
+        dt, training_data = load_dataset(args.file_train)
+    else:
+        dt, training_data = load(args.file_train)
+    
+    if args.file_test.endswith('.csv'):
+        dt2, test_data = load_csv(args.file_test)
+    elif args.file_test.endswith('.pt'):
+        dt2, test_data = load_dataset(args.file_test)
+    else:
+        dt2, test_data = load(args.file_test)
 
-    train_dataloader = DataLoader(training_data, batch_size=128, shuffle=True)
-    test_dataloader = DataLoader(test_data, batch_size=64)
+    train_dataloader = DataLoader(training_data, batch_size=1024, shuffle=True)
+    test_dataloader = DataLoader(test_data, batch_size=1024)
 
 
     model = QuadrotorModule(dt)
@@ -230,16 +273,26 @@ if __name__ == '__main__':
 
     learning_rate = 1e-3
     epochs = 10
+    train_losses, test_losses = [], []
 
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
 
     for t in range(epochs):
         print(f"Epoch {t+1}\n-------------------------------")
-        train_loop(train_dataloader, model, loss_fn, optimizer)
-        test_loop(test_dataloader, model, loss_fn)
+        train_loss = train_loop(train_dataloader, model, loss_fn, optimizer)
+        test_loss = test_loop(test_dataloader, model, loss_fn)
+        train_losses.append(train_loss)
+        test_losses.append(test_loss)
     print("Done!")
     print(model.state_dict())
 
+    plt.plot(range(epochs), train_losses, label="training error")
+    plt.plot(range(epochs), test_losses, label="test error")
+    plt.xlabel('epoch')
+    plt.ylabel('error')
+    plt.legend()
+    plt.title("Train and test error over epochs")
+    plt.show()
 
 
 

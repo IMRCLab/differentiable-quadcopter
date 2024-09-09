@@ -79,13 +79,13 @@ class QuadrotorAutograd():
 
 		# parameters (Crazyflie 2.0 quadrotor)
 		self.mass = 0.034 # true mass in kg
-		# self.mass = .134 # kg
 		# self.J = np.array([
 		# 	[16.56,0.83,0.71],
 		# 	[0.83,16.66,1.8],
 		# 	[0.72,1.8,29.26]
 		# 	]) * 1e-6  # kg m^2
 		self.J = torch.tensor([16.571710e-6, 16.655602e-6, 29.261652e-6], dtype=torch.float64)
+		# self.J = torch.tensor([1.05, 1.0, .95], dtype=torch.float64)
 
 		# Note: we assume here that our control is forces
 		arm_length = 0.046 # m
@@ -131,11 +131,13 @@ class QuadrotorAutograd():
 		# https://www.ashwinnarayan.com/post/how-to-integrate-quaternions/, and
 		# https://arxiv.org/pdf/1604.08139.pdf
 		omega_global = qrotate(q, omega)
+		# omega_global = omega
 		q_next = qnormalize(qintegrate(q, omega_global, self.dt))
 
 		# mJ = Jw x w + tau_u
 		inv_J = 1 / self.J  # diagonal matrix -> division
 		omega_next = state[...,10:] + (inv_J * (torch.cross(self.J * omega,omega, dim=-1) + tau_u)) * self.dt
+		# omega_next = state[..., 10:] + inv_J * omega # * tau_u * self.dt # simplified dynamics
 
 		return torch.cat((pos_next, vel_next, q_next, omega_next), dim=-1)
 
