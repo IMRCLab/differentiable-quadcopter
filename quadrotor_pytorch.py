@@ -113,6 +113,7 @@ class QuadrotorAutograd():
 		omega = state[...,10:]
 
 		# eta = torch.mv(self.B0, force)
+		# TODO: this line might be wrong - instead: eta = self.B0 @ force
 		eta = force @ self.B0.T
 		# f_u = torch.tensor([0,0,eta[0]])
 		batch_size = state.shape[0]
@@ -146,6 +147,7 @@ if __name__ == '__main__':
 
 	robot = QuadrotorAutograd()
 
+	# state: x = [x,y,z, v_x, v_y, v_x, q_w, q_x, q_y, q_z, omega_roll, omega_pitch, omega_yaw]
 	xbar = torch.tensor([[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]], requires_grad=True, dtype=torch.float64)
 	ubar = torch.tensor([[0, 0, 0, 0]], requires_grad=True, dtype=torch.float64)
 
