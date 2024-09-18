@@ -358,7 +358,7 @@ class ControllerLeeKhaled(nn.Module):
 		ew = currW - R.T @ Rd @ desW
 		torque = self.torqueCtrl(R, currW, er, ew, Rd, desW) #, des_wd)
 
-		return thrustSI, torque, desW #, desWd # with the controls (thrustSI, torque), the current state and a proper model of the drone a next state can be computed
+		return thrustSI, torque, Rd, desW #, desWd # with the controls (thrustSI, torque), the current state and a proper model of the drone a next state can be computed
 	
 	def computeControl(self):
 		return self.forward(self.uavModel.current_state, self.uavModel.desired_state)

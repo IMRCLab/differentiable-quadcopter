@@ -45,9 +45,9 @@ def fdotdot(coeffs, t):
     # shift time to time on current spline segment
     if idx > 0:
         t = t - times[idx-1]
-    x = 2 * coeffs['x^2'] + 6 * coeffs['x^3'] * t + 12 * coeffs['x^4'] * t**2 + 20 * coeffs['x^5'] * t**3 + 30 * coeffs['x^6'] * t**5 + 42 * coeffs['x^7'] * t**5
-    y = 2 * coeffs['y^2'] + 6 * coeffs['y^3'] * t + 12 * coeffs['y^4'] * t**2 + 20 * coeffs['y^5'] * t**3 + 30 * coeffs['y^6'] * t**5 + 42 * coeffs['y^7'] * t**5
-    z = 2 * coeffs['z^2'] + 6 * coeffs['z^3'] * t + 12 * coeffs['z^4'] * t**2 + 20 * coeffs['z^5'] * t**3 + 30 * coeffs['z^6'] * t**5 + 42 * coeffs['z^7'] * t**5
+    x = 2 * coeffs['x^2'] + 6 * coeffs['x^3'] * t + 12 * coeffs['x^4'] * t**2 + 20 * coeffs['x^5'] * t**3 + 30 * coeffs['x^6'] * t**4 + 42 * coeffs['x^7'] * t**5
+    y = 2 * coeffs['y^2'] + 6 * coeffs['y^3'] * t + 12 * coeffs['y^4'] * t**2 + 20 * coeffs['y^5'] * t**3 + 30 * coeffs['y^6'] * t**4 + 42 * coeffs['y^7'] * t**5
+    z = 2 * coeffs['z^2'] + 6 * coeffs['z^3'] * t + 12 * coeffs['z^4'] * t**2 + 20 * coeffs['z^5'] * t**3 + 30 * coeffs['z^6'] * t**4 + 42 * coeffs['z^7'] * t**5
     yaw = 2 * coeffs['yaw^2'] + 6 * coeffs['yaw^3'] * t + 12 * coeffs['yaw^4'] * t**2 + 20 * coeffs['yaw^5'] * t**3 + 30 * coeffs['yaw^6'] * t**5 + 42 * coeffs['yaw^7'] * t**5
     return np.array([[x], [y], [z], [yaw]]) 
 
@@ -68,22 +68,31 @@ def fdotdotdot(coeffs, t):
     yaw = 6 * coeffs['yaw^3'] + 24 * coeffs['yaw^4'] * t + 60 * coeffs['yaw^5'] * t**2 + 120 * coeffs['yaw^6'] * t**3 + 210 * coeffs['yaw^7'] * t**4
     return np.array([[x], [y], [z], [yaw]]) 
 
-data = pd.read_csv('figure8.csv')
+def plot_trajectory_data(data, func, title, tmax=None, resolution=1/50):
+    if tmax is None:
+        durations = data['duration']
+        times = np.cumsum(durations)
+        tmax = times.max()
+    num_timesteps = int(np.ceil(1/resolution))
+    ts = np.linspace(0, tmax, num=num_timesteps)
+    func_t = np.concat([func(data, t) for t in ts], axis=1).T
+    
+    fig, axs = plt.subplots(3,1)
+    fig.suptitle(title)
+    fig.supxlabel('time [s]')
+    for i, label in enumerate(['x', 'y', 'z']):
+        axs[i].plot(ts,func_t[:,i])
+        axs[i].set_ylabel(label)
+        axs[i].grid()
+    
+    fig.tight_layout()
+    plt.show()
 
-x = data['x^0']
-y = data['y^0']
-plt.plot(x, y)
-plt.show()
 
-durations = data['duration']
-times = np.cumsum(durations)
-tmax = times.max()
-ts = np.linspace(0, tmax, 100)
-f_t = np.concat([f(data, t) for t in ts], axis=1).T
+if __name__=="__main__":
+    data = pd.read_csv('figure8.csv')
 
-print(f_t.shape)
-x = f_t[:,0]
-y = f_t[:,1]
-
-plt.plot(x, y)
-plt.show()
+    plot_trajectory_data(data, func=f, title='UAV position')
+    plot_trajectory_data(data, func=fdot, title='UAV velocity')
+    plot_trajectory_data(data, func=fdotdot, title='UAV acceleration')
+    plot_trajectory_data(data, func=fdotdotdot, title='UAV jerk')
