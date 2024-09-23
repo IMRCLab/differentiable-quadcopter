@@ -6,11 +6,13 @@ import pandas as pd
 from controller import ControllerLeeKhaled
 from quadrotor_pytorch import QuadrotorAutograd
 from plot_figure8 import f, fdot, fdotdot, fdotdotdot
+from trajectories import spline_segment, f, fdot, fdotdot, fdotdotdot
 from torch import optim
 from torch.nn import L1Loss
 from train_system_id import qsym_distance
+from numpy.lib.stride_tricks import sliding_window_view
 
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 import matplotlib.pyplot as plt
 
@@ -55,15 +57,37 @@ class QuadrotorControllerModule(nn.Module):
 # 2. Compute desired trajectory to track
 # 3. Initialize UAV at start of the trajectory
 # 4. Track the trajectory using simulation
-class FourthOrderTrajectoryDataset(Dataset):
-    def __init__(self):
-        pass
+class NthOrderTrajectoryDataset(Dataset):
+    def __init__(self, parameter_file, funcs, dt, transform, t_max=None, t_0=0, window_size=None, as_setpoints=True):
+        parameters = pd.read_csv(parameter_file)
+        duration = np.sum(parameters['duration'])
+        if t_max is None:
+            t_max = duration
+        assert t_max <= duration, "t_max cannot be larger than the duration of the trajectory"
+        # create grid for time axis
+        self.ts = np.arange(t_0, t_max, dt)
+        self.as_setpoints = as_setpoints
+        self.order = len(funcs)
+
+        # generate the data
+        self.trajectory_data = spline_segment(funcs=funcs, coeffs=parameters, ts=self.ts)
+        self.transform = transform
+        self.window_size = window_size
+        if self.window_size is None:
+            self.window_size = len(self.ts)
+        self.slice_into_windows(window_size=self.window_size)
 
     def __len__(self):
-        pass
+        return len(self.data)
 
-    def __get_item__(self):
-        pass
+    def __getitem__(self, idx):
+        window = self.data[idx]
+        if self.as_setpoints:
+            window = self.to_setpoint(window)
+        if self.transform:
+            window = self.transform(window)
+        return window
+
     # x: input to the neural network
     # y: target output of the neural network
     # => x=initial position; y=desired trajectory
@@ -72,21 +96,37 @@ class FourthOrderTrajectoryDataset(Dataset):
         Slices the dataset into windows of a given length.
         """
         # return Nx4xwindow_size
+        self.window_size = window_size
+        self.data = sliding_window_view(x=self.trajectory_data, window_shape=self.window_size, axis=0).transpose((0,3,1,2))
+    
+    def to_setpoint(self, window):
+        return np.concat([window[...,0,0:3], window[...,1,0:3], window[...,2,0:3], window[...,3,0:3], window[...,0,3:3]], axis=-1)
+
+    
+def train_controller():
     pass
 
+
 if __name__=="__main__":
-    figure8_data = pd.read_csv('figure8.csv')
+    # figure8_data = pd.read_csv('figure8.csv')
+    dt = 1/50 # 50hz control frequency
+
+    # write custom transform to create setpoint
+    figure8_dataset = NthOrderTrajectoryDataset('figure8.csv', [f, fdot, fdotdot, fdotdotdot], dt=dt, transform=torch.tensor)
+    figure8_dataset.slice_into_windows(5)
+
+    train_dataloader = DataLoader(figure8_dataset, batch_size=8, shuffle=True)
+
     # compute the final arrival time
-    t_final = np.sum(figure8_data['duration'])
-    dt = 1/100 # 50hz control frequency
-    ts = np.arange(0, t_final, dt)
-    # 2. compute the desired trajectory
-    f_t = np.concat([f(figure8_data, t) for t in ts], axis=1).T
-    fdot_t = np.concat([fdot(figure8_data, t) for t in ts], axis=1).T
-    fdotdot_t = np.concat([fdotdot(figure8_data, t) for t in ts], axis=1).T
-    fdotdotdot_t = np.concat([fdotdotdot(figure8_data, t) for t in ts], axis=1).T
-    xd = f_t[:,0]
-    yd = f_t[:,1]
+    # t_final = np.sum(figure8_data['duration'])
+    # ts = np.arange(0, t_final, dt)
+    # # 2. compute the desired trajectory
+    # f_t = np.concat([f(figure8_data, t) for t in ts], axis=1).T
+    # fdot_t = np.concat([fdot(figure8_data, t) for t in ts], axis=1).T
+    # fdotdot_t = np.concat([fdotdot(figure8_data, t) for t in ts], axis=1).T
+    # fdotdotdot_t = np.concat([fdotdotdot(figure8_data, t) for t in ts], axis=1).T
+    xd = figure8_dataset.trajectory_data[0,:,0] # position x time x coordinates (x)
+    yd = figure8_dataset.trajectory_data[0,:,1] # position X time x coordinates (y)
     # initialize UAV
     quadrotor = QuadrotorAutograd()
     quadrotor.m = quadrotor.mass
@@ -113,7 +153,11 @@ if __name__=="__main__":
     for epoch in range(num_epochs):
         # set up initial state
         # s_0 = [s.x, s.y, s.z, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]
-        s = torch.tensor([f_t[0,0], f_t[0,1], f_t[0,2], 0, 0, 0, 1., 0, 0, 0, 0, 0, 0], dtype=torch.double)
+        s = torch.tensor([
+            figure8_dataset.trajectory_data[0,0,0],
+            figure8_dataset.trajectory_data[0,0,1],
+            figure8_dataset.trajectory_data[0,0,2],
+            0, 0, 0, 1., 0, 0, 0, 0, 0, 0], dtype=torch.double)
 
         # collect true x,y positions for plotting and evaluation
         x = [s[0]]
@@ -121,7 +165,7 @@ if __name__=="__main__":
 
         # simulate trajectory over time
         losses = []
-        for i,t in enumerate(ts):
+        for i,t in enumerate(figure8_dataset.ts):
             ## construct current setpoint
             s_d = torch.tensor([f_t[i,0], f_t[i,1], f_t[i,2], fdot_t[i,0], fdot_t[i,1], fdot_t[i,2], fdotdot_t[i,0], fdotdot_t[i,1], fdotdot_t[i,2], fdotdotdot_t[i,0], fdotdotdot_t[i,1], fdotdotdot_t[i,2],f_t[i,3]], dtype=torch.double)
 
