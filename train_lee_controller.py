@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 from controller_pytorch import ControllerLee
 from quadrotor_pytorch import QuadrotorAutograd
-from plot_figure8 import f, fdot, fdotdot, fdotdotdot
 from trajectories import spline_segment, f, fdot, fdotdot, fdotdotdot
 from torch import optim
 from train_system_id import qsym_distance
@@ -19,7 +18,7 @@ import matplotlib.pyplot as plt
 
 class QuadrotorControllerModule(nn.Module):
     def __init__(self, dt, kp=1., kv=1., kw=1., kr=1.):
-        super(QuadrotorControllerModule, self).__init__()
+        super().__init__()
         self.quadrotor = QuadrotorAutograd()
         self.quadrotor.dt = dt
         self.controller = ControllerLee(uavModel=self.quadrotor, kp=kp, kv=kv, kw=kw, kr=kr)
@@ -173,16 +172,17 @@ if __name__=="__main__":
     # figure8_data = pd.read_csv('figure8.csv')
     dt = 1/50 # 50hz control frequency
     lr = 1e-3
-    epochs = 10
+    epochs = 0
     visualize_trajectory = True
     report_gains = True
+    window_size = 5
 
     # write custom transform to create setpoint
     figure8_dataset = NthOrderTrajectoryDataset('figure8.csv', [f, fdot, fdotdot, fdotdotdot], dt=dt, transform=torch.tensor)
-    figure8_dataset.slice_into_windows(5)
+    figure8_dataset.slice_into_windows(window_size=window_size)
 
     train_dataloader = DataLoader(figure8_dataset, batch_size=8, shuffle=True)
-    quadrotor_controller_module = QuadrotorControllerModule(dt=dt, kp=9., kv=7., kw=0.0013, kr=0.0055)
+    quadrotor_controller_module = QuadrotorControllerModule(dt=dt, kp=[[9.],[9.],[9.]], kv=7., kw=0.0013, kr=0.0055)
     criterion = QuadrotorControllerLoss(loss_fn='L1')
     optimizer = optim.Adam(quadrotor_controller_module.parameters(), lr=lr)
 
