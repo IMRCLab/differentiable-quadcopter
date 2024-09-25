@@ -3,14 +3,14 @@ from torch import nn
 import roma
 import numpy as np
 import pandas as pd
-from controller import ControllerLeeKhaled
+from controller_pytorch import ControllerLee
 from quadrotor_pytorch import QuadrotorAutograd
 from plot_figure8 import f, fdot, fdotdot, fdotdotdot
 from trajectories import spline_segment, f, fdot, fdotdot, fdotdotdot
 from torch import optim
-from torch.nn import L1Loss
 from train_system_id import qsym_distance
 from numpy.lib.stride_tricks import sliding_window_view
+from tqdm import tqdm
 
 from torch.utils.data import Dataset, DataLoader
 
@@ -18,45 +18,86 @@ import matplotlib.pyplot as plt
 
 
 class QuadrotorControllerModule(nn.Module):
-    def __init__(self, dt, planning_horizon):
+    def __init__(self, dt, kp=1., kv=1., kw=1., kr=1.):
         super(QuadrotorControllerModule, self).__init__()
         self.quadrotor = QuadrotorAutograd()
         self.quadrotor.dt = dt
-        self.controller = ControllerLeeKhaled(uavModel=self.quadrotor)
+        self.controller = ControllerLee(uavModel=self.quadrotor, kp=kp, kv=kv, kw=kw, kr=kr)
 
-        self.kp = nn.Parameter(torch.tensor(self.controller.kp))
-        self.kv = nn.Parameter(torch.tensor(self.controller.kv))
-        self.kw = nn.Parameter(torch.tensor(self.controller.kw))
-        self.kr = nn.Parameter(torch.tensor(self.controller.kr))
+        self.kp = nn.Parameter(torch.tensor(self.controller.kp).clone().detach().requires_grad_(True))
+        self.kv = nn.Parameter(torch.tensor(self.controller.kv).clone().detach().requires_grad_(True))
+        self.kw = nn.Parameter(torch.tensor(self.controller.kw).clone().detach().requires_grad_(True))
+        self.kr = nn.Parameter(torch.tensor(self.controller.kr).clone().detach().requires_grad_(True))
 
         self.controller.kp = self.kp
         self.controller.kv = self.kv
         self.controller.kw = self.kw
         self.controller.kr = self.kr
 
-        self.planning_horizon = planning_horizon
-
         self.double()
     
-    def forward(self, s_d, s_0=None):
-        if s_0 is not None:
-            s = s_0
-        else:
-            s = s_d[0]
-        y = [s]
-        for i in self.planning_horizon:
-            control = self.controller.computeControl()
-            s = self.quadrotor.step()
-            y += [s]
-        return torch.stack(y)
+    def forward(self, setpoints, s_0=None):
+        """
+        Simulate a trajectory along a list of setpoints.
 
+        Parameters:
+        -----------
+        setpoints: torch.Tensor
+            batch of setpoints with shape (B,T,S) where B is the batch size, T is the trajectory length and S is the setpoint dimension.
+
+        s_0: torch.Tensor (optional)
+            tensor with initial states with shape (B,X) where B is the batch size and X is the state dimension.
+
+        Returns:
+        --------
+        y: torch.Tensor
+            Tensor with actual states encountered during simulation with shape (B,T,X)
+        Rds: torch.Tensor
+            Tensor with desired rotations in rotation matrix representation.
+        desWs: torch.Tensor
+            Tensor with desired attitude rates.
+        """
+        if s_0 is not None:
+            current_state = s_0
+        else:
+            # construct the initial states from the first setpoints if no initial state is given
+            batch_size = setpoints.shape[1] # time first, batch second
+            current_state = torch.zeros((batch_size, 13), dtype=setpoints.dtype)
+            current_state[:,0] = setpoints[0,:,0]
+            current_state[:,1] = setpoints[0,:,1]
+            current_state[:,2] = setpoints[0,:,2]
+            current_state[:,3] = setpoints[0,:,3]
+            current_state[:,4] = setpoints[0,:,4]
+            current_state[:,5] = setpoints[0,:,5]
+            current_state[:,6] = 1.  # unit quaternion with identity rotation
+        y = []
+        Rds = []
+        desWs = []
+        for setpoint in setpoints:
+            y += [current_state]
+            thrustSI, torque, Rd, desW = self.controller.compute_controls(current_state=current_state, setpoint=setpoint)
+            Rds += [Rd]
+            desWs += [desW]
+            force = self.quadrotor.B0.inverse() @ torch.concat([thrustSI, torque], dim=1)
+            current_state = self.quadrotor.step(state=current_state, force=force.squeeze(-1))
+        return torch.stack(y, dim=0), torch.stack(Rds, dim=0), torch.stack(desWs, dim=0) # time first in -> time first out
+
+class QuadrotorControllerLoss(nn.Module):
+    def __init__(self, loss_fn='L1'):
+        super().__init__()
+        if loss_fn == 'L1':
+            self.loss_fn = nn.L1Loss()
+        elif loss_fn == 'MSE':
+            self.loss_fn = nn.MSELoss()
+
+    def forward(self, states, setpoints, desR, desW):
+        position_loss = self.loss_fn(states[...,0:3], setpoints[...,0:3])
+        velocity_loss = self.loss_fn(states[...,3:6], setpoints[...,3:6])
+        rotational_loss = torch.mean(qsym_distance(roma.rotmat_to_unitquat(desR), states[...,6:10]))
+        omega_loss = self.loss_fn(desW, states[...,10:13])
+        return (position_loss, velocity_loss, rotational_loss, omega_loss)
         
 
-# Simulation/Training loop for the Lee Controller
-# 1. Create Lee controller instance with random gains
-# 2. Compute desired trajectory to track
-# 3. Initialize UAV at start of the trajectory
-# 4. Track the trajectory using simulation
 class NthOrderTrajectoryDataset(Dataset):
     def __init__(self, parameter_file, funcs, dt, transform, t_max=None, t_0=0, window_size=None, as_setpoints=True):
         parameters = pd.read_csv(parameter_file)
@@ -100,105 +141,65 @@ class NthOrderTrajectoryDataset(Dataset):
         self.data = sliding_window_view(x=self.trajectory_data, window_shape=self.window_size, axis=0).transpose((0,3,1,2))
     
     def to_setpoint(self, window):
-        return np.concat([window[...,0,0:3], window[...,1,0:3], window[...,2,0:3], window[...,3,0:3], window[...,0,3:3]], axis=-1)
+        return np.concat([window[...,0,0:3], window[...,1,0:3], window[...,2,0:3], window[...,3,0:3], window[...,0,3:4]], axis=-1)
 
     
-def train_controller():
-    pass
+def train_quadrotor_controller_module(model, criterion, optimizer, trainloader):
+    running_loss = 0.0
+    pbar = tqdm(total=len(trainloader))
+    model.train()
+    for i, setpoints in enumerate(trainloader):
+        optimizer.zero_grad()
+        states, Rds, desWs = model(setpoints.transpose(0,1))  # seq_len x batch_size x state_size
+        position_loss, velocity_loss, rotational_loss, omega_loss = criterion(states.transpose(0,1), setpoints, Rds.transpose(0,1), desWs.squeeze(-1).transpose(0,1))
+        loss = position_loss + velocity_loss + rotational_loss + omega_loss
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+        pbar.set_description(f"loss={running_loss / (i+1):0.4g}")
+        pbar.update(1)
+    pbar.close()
+
+def run_trajectory(model, trajectory, s_0=None):
+    model.eval()
+    with torch.no_grad():
+        states, Rds, desWs = model(trajectory.unsqueeze(1), s_0=s_0)
+    return states.squeeze(1)
+
 
 
 if __name__=="__main__":
     # figure8_data = pd.read_csv('figure8.csv')
     dt = 1/50 # 50hz control frequency
+    lr = 1e-3
+    epochs = 10
+    visualize_trajectory = True
+    report_gains = True
 
     # write custom transform to create setpoint
     figure8_dataset = NthOrderTrajectoryDataset('figure8.csv', [f, fdot, fdotdot, fdotdotdot], dt=dt, transform=torch.tensor)
     figure8_dataset.slice_into_windows(5)
 
     train_dataloader = DataLoader(figure8_dataset, batch_size=8, shuffle=True)
+    quadrotor_controller_module = QuadrotorControllerModule(dt=dt, kp=9., kv=7., kw=0.0013, kr=0.0055)
+    criterion = QuadrotorControllerLoss(loss_fn='L1')
+    optimizer = optim.Adam(quadrotor_controller_module.parameters(), lr=lr)
 
-    # compute the final arrival time
-    # t_final = np.sum(figure8_data['duration'])
-    # ts = np.arange(0, t_final, dt)
-    # # 2. compute the desired trajectory
-    # f_t = np.concat([f(figure8_data, t) for t in ts], axis=1).T
-    # fdot_t = np.concat([fdot(figure8_data, t) for t in ts], axis=1).T
-    # fdotdot_t = np.concat([fdotdot(figure8_data, t) for t in ts], axis=1).T
-    # fdotdotdot_t = np.concat([fdotdotdot(figure8_data, t) for t in ts], axis=1).T
-    xd = figure8_dataset.trajectory_data[0,:,0] # position x time x coordinates (x)
-    yd = figure8_dataset.trajectory_data[0,:,1] # position X time x coordinates (y)
-    # initialize UAV
-    quadrotor = QuadrotorAutograd()
-    quadrotor.m = quadrotor.mass
-    quadrotor.I = torch.diag(quadrotor.J.clone().detach())
-    quadrotor.dt = dt
-    # initialize controller instance
-    controller = ControllerLeeKhaled(uavModel=quadrotor, kp=9.0, kv=7.0, kr=0.0055, kw=0.0013)
-    # controller = ControllerLeeKhaled(uavModel=quadrotor, kp=8.9986, kv=7.0014, kr=0.0069, kw=0.0004)
-    # controller = ControllerLeeKhaled(uavModel=quadrotor, kp=1.0, kv=1.0, kr=.01, kw=.01)
-    # initialize optimizer for controller gains
-    optimizer = optim.Adam(controller.parameters(), lr=1e-5)
-    loss_fn = L1Loss()
-    # 4. track the trajectory using simulation
-    num_epochs = 50
-    visualize_trajectory = True
+    for epoch in range(epochs):
+        train_quadrotor_controller_module(model=quadrotor_controller_module, criterion=criterion, optimizer=optimizer, trainloader=train_dataloader)
+        if report_gains:
+            print(f"Gains after {epoch+1} epochs:\nkp={quadrotor_controller_module.kv.item()}\tkv={quadrotor_controller_module.kv.item()}\tkw={quadrotor_controller_module.kw.item()}\tkr={quadrotor_controller_module.kr.item()}")
 
-    # initialize state for t=0
-    # structure for the state vector of the UAV is:
-    # s = [x, y, z, v_x, v_y, v_z, qw, qx, qy, qz, omega_roll ,omega_yaw, omega_pitch]
-
-    # structure for the setpoint vector of the trajectory is:
-    # desired_setpoint = [p_x, p_y, p_z, v_x, v_y, v_z, a_x, a_y, a_z, j_x, j_y, j_z, yaw]
-    # training loop
-    for epoch in range(num_epochs):
-        # set up initial state
-        # s_0 = [s.x, s.y, s.z, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]
-        s = torch.tensor([
-            figure8_dataset.trajectory_data[0,0,0],
-            figure8_dataset.trajectory_data[0,0,1],
-            figure8_dataset.trajectory_data[0,0,2],
-            0, 0, 0, 1., 0, 0, 0, 0, 0, 0], dtype=torch.double)
-
-        # collect true x,y positions for plotting and evaluation
-        x = [s[0]]
-        y = [s[1]]
-
-        # simulate trajectory over time
-        losses = []
-        for i,t in enumerate(figure8_dataset.ts):
-            ## construct current setpoint
-            s_d = torch.tensor([f_t[i,0], f_t[i,1], f_t[i,2], fdot_t[i,0], fdot_t[i,1], fdot_t[i,2], fdotdot_t[i,0], fdotdot_t[i,1], fdotdot_t[i,2], fdotdotdot_t[i,0], fdotdotdot_t[i,1], fdotdotdot_t[i,2],f_t[i,3]], dtype=torch.double)
-
-            # compute controls
-            thrustSI, torque, desR, desW = controller(s.flatten(), s_d)
-
-            # compute forces for rotors from thrust (1x1) and torque (3x1)
-            force = quadrotor.B0.inverse() @ torch.concat([thrustSI, torque])
-
-            # simulate UAV
-            s = quadrotor.step(s.reshape((1,-1)), force.reshape(1,4))
-
-            # store x,y position for plotting
-            x.append(s[0,0].item())
-            y.append(s[0,1].item())
-
-            # compute loss
-            # TODO: change this to also compute the error in attitude
-            position_loss = loss_fn(s_d[:3], s[0,:3])
-            velocity_loss = loss_fn(s_d[3:6], s[0,3:6])
-            # rotational_loss = qsym_distance(roma.rotmat_to_unitquat(desR), s[0,6:10])
-            omega_loss = loss_fn(desW.flatten(), s[0,10:13])
-            losses.append(position_loss+velocity_loss+omega_loss)
-
-        if visualize_trajectory:
-            plt.plot(x,y, label='simulated trajectory')
-            plt.plot(xd, yd, label='desired trajectory')
-            plt.legend()
-            plt.show()
-        loss = torch.mean(torch.stack(losses))
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        print(f"Loss: {loss.item()}")
-        print(f"New gains: kp={controller.kp}, kw={controller.kw}, kv={controller.kv}, kr={controller.kr}")
-
+    if visualize_trajectory:
+        ax = plt.figure().add_subplot(projection='3d')
+        setpoint_trajectory = torch.tensor(figure8_dataset.to_setpoint(figure8_dataset.trajectory_data), dtype=torch.double)
+        states = run_trajectory(quadrotor_controller_module, setpoint_trajectory)
+        ax.plot(states[:,0], states[:,1], states[:,2], label='simulated trajectory')
+        ax.plot(setpoint_trajectory[:,0],setpoint_trajectory[:,1], setpoint_trajectory[:,2], label='desired trajectory')
+        ax.legend()
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.view_init(elev=20, azim=-35, roll=0)
+        plt.show()

@@ -12,9 +12,9 @@ def hat_so3(v: torch.Tensor):
     return Rs
 
 def vee_so3(R:torch.Tensor):
-    return 0.5 * torch.tensor([[R[...,2,1]-R[...,1,2]],
-                               [R[...,0,2]-R[...,2,0]],
-                               [R[...,1,0]-R[...,0,1]]], dtype=R.dtype)
+    return 0.5 * torch.stack([R[...,2,1]-R[...,1,2],
+                              R[...,0,2]-R[...,2,0],
+                              R[...,1,0]-R[...,0,1]], axis=-1)
 
 class ControllerLee():
     def __init__(self, uavModel, kp=1., kv=1., kw=1., kr=1.):
@@ -30,6 +30,8 @@ class ControllerLee():
         self.uavModel = uavModel # the model the controller controls
         self.m = torch.tensor(uavModel.m, dtype=torch.double)
         self.I = torch.tensor(uavModel.I, dtype=torch.double)
+        if self.I.dim() == 1:
+            self.I = torch.diag(self.I)
     
         # make the gains tunable parameters
         self.kp = torch.tensor(kp)
@@ -37,8 +39,6 @@ class ControllerLee():
         self.kw = torch.tensor(kw)
         self.kr = torch.tensor(kr)
 
-        self.double()
-    
     def updateUAVModel(self, uavModel):
         self.m = torch.tensor(uavModel.m, dtype=torch.double)
         self.I = torch.tensor(uavModel.I, dtype=torch.double)
@@ -65,12 +65,11 @@ class ControllerLee():
             FdI: torch.Tensor
                 I don't know
         """
-        e3 = torch.zeros((*R.shape[:-2],3,1), dtype=R.dtype)
-        e3[...,2,0] = 1
+        e3 = torch.tensor([[0.],[0.],[1.]], dtype=R.dtype)
         kpep = self.kp * ep
         kvev = self.kv * ev
         FdI = refAcc - kpep - kvev
-        return (self.m * FdI.T @ R @ e3), FdI
+        return (self.m * FdI.transpose(1,2) @ R @ e3), FdI
     
     @staticmethod
     def computeDesiredRot(Fd, yaw):
@@ -84,16 +83,18 @@ class ControllerLee():
             yaw: torch.Tensor
                 desired yaw of the quadrotor. relevant for b_1 vector
         """
-        Rd = torch.empty((*Fd.shape[:-2],3,3), dtype=Fd.dtype)
-        normFd = torch.linalg.norm(Fd, dim=(-2,-1))
+        assert Fd.dim() == 3, "Missing batch dimension for Fd"
+        batch_size = Fd.shape[0]
+        Rd = torch.empty((batch_size,3,3), dtype=Fd.dtype)
+        normFd = torch.linalg.norm(Fd, dim=(-2,-1),keepdim=True)
         zdes = torch.zeros_like(Fd)
-        zdes_mask = normFd > 0
+        zdes_mask = normFd.squeeze((-2,-1)) > 0
         zdes[zdes_mask] = Fd / normFd
         zdes[~zdes_mask] = torch.tensor([[0],[0],[1]], dtype=Fd.dtype)
         
-        xcdes = torch.zeros((*Fd.shape[:-2],3,1), dtype=Fd.dtype)
-        xcdes[...,0,0] = torch.cos(yaw)
-        xcdes[...,1,0] = torch.sin(yaw)
+        xcdes = torch.zeros((batch_size,3,1), dtype=Fd.dtype)
+        xcdes[:,0,0] = torch.cos(yaw)
+        xcdes[:,1,0] = torch.sin(yaw)
         normZX = torch.linalg.norm(hat_so3(zdes) @ xcdes, dim=(-2,-1))
 
         ydes = torch.zeros_like(Fd)
@@ -102,9 +103,9 @@ class ControllerLee():
         ydes[~ydes_mask] = torch.tensor([[0],[1],[0]], dtype=Fd.dtype)
         
         xdes = torch.cross(ydes, zdes, dim=-2)
-        Rd[...,:1] = xdes
-        Rd[...,1:2] = ydes
-        Rd[...,2:3] = zdes
+        Rd[:,:,:1] = xdes
+        Rd[:,:,1:2] = ydes
+        Rd[:,:,2:3] = zdes
         return Rd
 
     def computeWd(self, R, T, desJerk):
@@ -122,24 +123,25 @@ class ControllerLee():
             desJerk: torch.Tensor
                 desired jerk of the quadrotor
         """
-        xb = R[...,0:1]
-        yb = R[...,1:2]
-        zb = R[...,2:3]
+        batch_size = R.shape[0]
+        xb = R[:,:,0:1]
+        yb = R[:,:,1:2]
+        zb = R[:,:,2:3]
         hw = torch.zeros_like(desJerk)
         # TODO: maybe this should test for a range close to zeros because of numerical issues
-        hw_mask = T==0
-        hw[~hw_mask] = self.m / T[~hw_mask] * (desJerk[~hw_mask] - zb[~hw_mask].T @ desJerk[~hw_mask] * zb[~hw_mask])
-        p = -hw.T @ yb
-        q = hw.T @ xb
-        r = torch.zeros((*desJerk.shape[:-2],1), dtype=desJerk.dtype)
-        return torch.tensor([p, q, r], dtype=torch.double).reshape((...,3,1))
+        hw_mask = (T==0).squeeze((-2,-1))
+        hw[~hw_mask] = self.m / T[~hw_mask] * (desJerk[~hw_mask] - zb[~hw_mask].mT @ desJerk[~hw_mask] * zb[~hw_mask])
+        p = -hw.mT @ yb
+        q = hw.mT @ xb
+        r = torch.zeros((batch_size,1,1), dtype=desJerk.dtype)
+        return torch.concat([p,q,r], dim=1)
 
 
     def torqueCtrl(self, R, curr_w, er, ew, Rd, des_w): # , des_wd):
         krer = self.kr * er
         kwew = self.kw * ew
         return (-krer - kwew + (torch.cross(curr_w, (self.I @ curr_w), dim=-2))) \
-            - self.I @ (hat_so3(curr_w) @ R.T @ Rd @ des_w) # - R.T @ Rd @ des_wd)
+            - self.I @ (hat_so3(curr_w) @ R.mT @ Rd @ des_w) # - R.T @ Rd @ des_wd)
 
     # the forward pass of the controller should be the main function
     # it takes a state and a desired state as input and returns the controls i.e. thrust and moments
@@ -158,37 +160,27 @@ class ControllerLee():
                 [x, y, z, v_x, v_y, v_z, a_x, a_y, a_z, j_x, j_y, j_z, yaw]
         """
         # current state of the quadrotor
-        # currPos = torch.tensor([current_state.position.x, current_state.position.y, current_state.position.z]).reshape((3,1))
-        input_shape = current_state.shape
-        currPos = current_state[...,:3].reshape((*input_shape[:-1],3,1))
-        # currVel = torch.tensor([current_state.velocity.x, current_state.velocity.y, current_state.velocity.z]).reshape((3,1))
-        currVel = current_state[...,3:6].reshape((*input_shape[:-1],3,1))
-        R = roma.unitquat_to_rotmat(torch.stack([current_state[...,7], current_state[...,8], current_state[...,9], current_state[...,6]],axis=-1))
-        # R = torch.tensor(rowan.to_matrix(current_state.attitudeQuaternion), dtype=torch.float)
-        # currW = torch.tensor([current_state.attitudeRate.roll, current_state.attitudeRate.pitch, current_state.attitudeRate.yaw]).reshape((3,1))
-        currW = current_state[...,10:13].reshape((*input_shape[:-1],3,1))
+        currPos = current_state[:,:3].reshape((-1,3,1))
+        currVel = current_state[:,3:6].reshape((-1,3,1))
+        R = roma.unitquat_to_rotmat(torch.stack([current_state[:,7], current_state[:,8], current_state[:,9], current_state[:,6]],axis=-1))
+        currW = current_state[:,10:13].reshape((-1,3,1))
 
-        # TODO: Add handling of batch dimension to slicing
         # desired state of the quadrotor
-        # desPos = torch.tensor([desired_state.position.x, desired_state.position.y, desired_state.position.z]).reshape((3,1))
-        desPos = setpoint[:3].reshape((3,1))
-        # desVel = torch.tensor([desired_state.velocity.x, desired_state.velocity.y, desired_state.velocity.z]).reshape((3,1))    
-        desVel = setpoint[3:6].reshape((3,1))
-        # desAcc = torch.tensor([desired_state.acceleration.x, desired_state.acceleration.y, desired_state.acceleration.z]).reshape((3,1))
-        desAcc = setpoint[6:9].reshape((3,1))
-        # desJerk = torch.tensor([desired_state.jerk.x, desired_state.jerk.y, desired_state.jerk.z]).reshape((3,1))
-        desJerk = setpoint[9:12].reshape((3,1))
-        desYaw = setpoint[12]
+        desPos = setpoint[:,:3].reshape((-1,3,1))
+        desVel = setpoint[:,3:6].reshape((-1,3,1))
+        desAcc = setpoint[:,6:9].reshape((-1,3,1))
+        desJerk = setpoint[:,9:12].reshape((-1,3,1))
+        desYaw = setpoint[:,12]
         # desSnap = torch.tensor([desired_state.snap.x, desired_state.snap.y, desired_state.snap.z]).reshape((3,1))
         ep = (currPos - desPos) # tracking error in position
         ev = (currVel  - desVel) # tracking error in velocity
 
-        gravComp = torch.tensor([0.,0.,9.81], dtype=torch.double).reshape((3,1))
+        gravComp = torch.tensor([[0.],[0.],[9.81]], dtype=ep.dtype)
         thrustSI, FdI = self.thrustCtrl(R, desAcc+gravComp, ep, ev)
 
         Rd = self.computeDesiredRot(FdI, desYaw)
 
-        er = 0.5 * vee_so3(Rd.T @ R - R.T @ Rd) # tracking error in rotation
+        er = 0.5 * vee_so3(Rd.transpose(1,2) @ R - R.transpose(1,2) @ Rd).unsqueeze(-1) # tracking error in rotation
 
         # zb = Rd[:,2]
         T = thrustSI
@@ -196,7 +188,7 @@ class ControllerLee():
         desW = self.computeWd(Rd, T, desJerk)
         # Td_dot = m * desSnap.T @ zb - # this line contains error in the original code
         # des_wd = self.computeWddot(R, des_w, T, Td, Td_dow, dessnap)
-        ew = currW - R.T @ Rd @ desW
+        ew = currW - R.transpose(1,2) @ Rd @ desW
         torque = self.torqueCtrl(R, currW, er, ew, Rd, desW) #, des_wd)
 
         return thrustSI, torque, Rd, desW #, desWd # with the controls (thrustSI, torque), the current state and a proper model of the drone a next state can be computed
