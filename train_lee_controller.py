@@ -1,4 +1,8 @@
+import argparse
+import time
 import torch
+from torch.utils.tensorboard import SummaryWriter
+from distutils.util import strtobool
 from torch import nn
 import roma
 import numpy as np
@@ -8,7 +12,6 @@ from quadrotor_pytorch import QuadrotorAutograd
 from trajectories import spline_segment, f, fdot, fdotdot, fdotdotdot
 from torch import optim
 from train_system_id import qsym_distance
-from numpy.lib.stride_tricks import sliding_window_view
 from tqdm import tqdm
 
 from torch.utils.data import Dataset, DataLoader
@@ -17,16 +20,16 @@ import matplotlib.pyplot as plt
 
 
 class QuadrotorControllerModule(nn.Module):
-    def __init__(self, dt, kp=1., kv=1., kw=1., kr=1.):
+    def __init__(self, dt, kp=1., kv=1., kw=1., kr=1., noise_on=False):
         super().__init__()
-        self.quadrotor = QuadrotorAutograd()
+        self.quadrotor = QuadrotorAutograd(noise_on=noise_on)
         self.quadrotor.dt = dt
         self.controller = ControllerLee(uavModel=self.quadrotor, kp=kp, kv=kv, kw=kw, kr=kr)
 
-        self.kp = nn.Parameter(torch.tensor(self.controller.kp).clone().detach().requires_grad_(True))
-        self.kv = nn.Parameter(torch.tensor(self.controller.kv).clone().detach().requires_grad_(True))
-        self.kw = nn.Parameter(torch.tensor(self.controller.kw).clone().detach().requires_grad_(True))
-        self.kr = nn.Parameter(torch.tensor(self.controller.kr).clone().detach().requires_grad_(True))
+        self.kp = nn.Parameter(self.controller.kp.clone().detach().requires_grad_(True))
+        self.kv = nn.Parameter(self.controller.kv.clone().detach().requires_grad_(True))
+        self.kw = nn.Parameter(self.controller.kw.clone().detach().requires_grad_(True))
+        self.kr = nn.Parameter(self.controller.kr.clone().detach().requires_grad_(True))
 
         self.controller.kp = self.kp
         self.controller.kv = self.kv
@@ -42,7 +45,7 @@ class QuadrotorControllerModule(nn.Module):
         Parameters:
         -----------
         setpoints: torch.Tensor
-            batch of setpoints with shape (B,T,S) where B is the batch size, T is the trajectory length and S is the setpoint dimension.
+            batch of setpoints with shape (T,B,S) where B is the batch size, T is the trajectory length and S is the setpoint dimension.
 
         s_0: torch.Tensor (optional)
             tensor with initial states with shape (B,X) where B is the batch size and X is the state dimension.
@@ -135,16 +138,21 @@ class NthOrderTrajectoryDataset(Dataset):
         """
         Slices the dataset into windows of a given length.
         """
-        # return Nx4xwindow_size
+        dataset_size = len(self.trajectory_data)
+        if window_size > dataset_size:
+            window_size = dataset_size
         self.window_size = window_size
-        self.data = sliding_window_view(x=self.trajectory_data, window_shape=self.window_size, axis=0).transpose((0,3,1,2))
+        N = dataset_size // window_size
+        splits = np.split(self.trajectory_data[:N*window_size], N, axis=0)
+        self.data = np.stack(splits, axis=0) # num_windows x window_size x num_spline_order x pose_size
     
     def to_setpoint(self, window):
         return np.concat([window[...,0,0:3], window[...,1,0:3], window[...,2,0:3], window[...,3,0:3], window[...,0,3:4]], axis=-1)
 
     
-def train_quadrotor_controller_module(model, criterion, optimizer, trainloader):
-    running_loss = 0.0
+def train_quadrotor_controller_module(model, criterion, optimizer, trainloader, writer=None):
+    running_loss, running_position_loss, running_velocity_loss, running_rotational_loss, running_omega_loss = 0.0, 0.0, 0.0, 0.0, 0.0
+
     pbar = tqdm(total=len(trainloader))
     model.train()
     for i, setpoints in enumerate(trainloader):
@@ -153,48 +161,139 @@ def train_quadrotor_controller_module(model, criterion, optimizer, trainloader):
         position_loss, velocity_loss, rotational_loss, omega_loss = criterion(states.transpose(0,1), setpoints, Rds.transpose(0,1), desWs.squeeze(-1).transpose(0,1))
         loss = position_loss + velocity_loss + rotational_loss + omega_loss
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 1.)
         optimizer.step()
 
+        with torch.no_grad():
+            for parameter in model.parameters():
+                parameter.clamp_(min=1e-8)
+
         running_loss += loss.item()
+        running_position_loss += position_loss.item()
+        running_velocity_loss += velocity_loss.item()
+        running_rotational_loss += rotational_loss.item()
+        running_omega_loss += omega_loss.item()
         pbar.set_description(f"loss={running_loss / (i+1):0.4g}")
         pbar.update(1)
     pbar.close()
+    return running_position_loss / (i+1), running_velocity_loss / (i+1), running_rotational_loss / (i+1), running_omega_loss / (i+1)
 
 def run_trajectory(model, trajectory, s_0=None):
     model.eval()
     with torch.no_grad():
         states, Rds, desWs = model(trajectory.unsqueeze(1), s_0=s_0)
-    return states.squeeze(1)
+    return states.squeeze(1), Rds.squeeze(1), desWs.squeeze(q)
 
 
 
 if __name__=="__main__":
     # figure8_data = pd.read_csv('figure8.csv')
-    dt = 1/50 # 50hz control frequency
-    lr = 1e-3
-    epochs = 0
-    visualize_trajectory = True
-    report_gains = True
-    window_size = 5
+    # dt = 1/100 # 50hz control frequency
+    # lr = 10000
+    # epochs = 1000
+    # visualize_trajectory = True
+    # report_gains = True
+    # window_size = 400
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--parameter-file', type=str, default='figure8.csv',
+                        help='name of the file which contains the parameters for the trajectory splines')
+    parser.add_argument('--dt', type=float, default=1/100,
+                        help='duration of a simulation step in seconds')
+    parser.add_argument('--lr', type=float, default=1e-3,
+                        help='the learning rate of the optimizer')
+    parser.add_argument('--batch-size', type=int, default=8,
+                        help='the size of the batches for training')
+    parser.add_argument('--epochs', type=int, default=0,
+                        help='the number of epochs to run the optimization')
+    parser.add_argument('--window-size', type=int, default=4,
+                        help='the length of the time windows the trajectory is cut into for training')
+    parser.add_argument('--visualize-trajectory', type=lambda x: bool(strtobool(x)) ,default=True,
+                        help='Toggles whether or not the trajectory should be visualized after training')
+    parser.add_argument('--report-gains', type=lambda x: bool(strtobool(x)) ,default=False,
+                        help='Toggles whether or not the current gains are reported during training')
+    parser.add_argument('--track', type=lambda x: bool(strtobool(x)), default=False, nargs='?', const=True,
+                        help='if toggled, this experiment will be tracked with Weights and Biases')
+    parser.add_argument('--optimizer', type=str, default='SGD',
+                        help='the optimizer used tune the gains')
+    parser.add_argument('--loss-fn', type=str, default='MSE',
+                        help='the loss function used for the optimization')
+    parser.add_argument('--sim-noise', type=lambda x: bool(strtobool(x)), default=False,
+                        help='if toggled, the simulation will be run with noise')
+    parser.add_argument('--double-window-size-on-plateau', type=lambda x: bool(strtobool(x)), default=True,
+                        help='if toggled, the window size will double if the training loss does not decrease any more')
+                
+    args = parser.parse_args()
+    
 
     # write custom transform to create setpoint
-    figure8_dataset = NthOrderTrajectoryDataset('figure8.csv', [f, fdot, fdotdot, fdotdotdot], dt=dt, transform=torch.tensor)
-    figure8_dataset.slice_into_windows(window_size=window_size)
+    figure8_dataset = NthOrderTrajectoryDataset('figure8.csv', [f, fdot, fdotdot, fdotdotdot], dt=args.dt, transform=torch.tensor)
+    figure8_dataset.slice_into_windows(window_size=args.window_size)
 
-    train_dataloader = DataLoader(figure8_dataset, batch_size=8, shuffle=True)
-    quadrotor_controller_module = QuadrotorControllerModule(dt=dt, kp=[[9.],[9.],[9.]], kv=7., kw=0.0013, kr=0.0055)
-    criterion = QuadrotorControllerLoss(loss_fn='L1')
-    optimizer = optim.Adam(quadrotor_controller_module.parameters(), lr=lr)
+    train_dataloader = DataLoader(figure8_dataset, batch_size=args.batch_size, shuffle=True)
+    # quadrotor_controller_module = QuadrotorControllerModule(dt=dt, kp=[[9.],[9.],[9.]], kv=[[7.],[7.],[7.]], kw=[[0.0013],[0.0013],[0.0013]], kr=[[0.0055],[0.0055],[0.0055]])
+    # quadrotor_controller_module = QuadrotorControllerModule(dt=args.dt, kp=[[1.],[1.],[1.]], kv=[[1.],[1.],[1.]], kw=[[1.],[1.],[1.]], kr=[[1.],[1.],[1.]], noise_on=args.sim_noise)
+    quadrotor_controller_module = QuadrotorControllerModule(dt=args.dt, kp=[[0.8557730652819432], [1.0935266831827213], [1.1378830690574784]], kv=[[1.0499406668079418], [1.1435798304026576], [1.0953624603085077]], kw=[[0.003153056642205069], [0.001154707110528682], [0.005679290258691776]], kr=[[0.01928796833157137], [0.017564737652027082], [0.08202443114730949]], noise_on=args.sim_noise)
+    criterion = QuadrotorControllerLoss(loss_fn=args.loss_fn)
+    if args.optimizer == 'SGD':
+        optimizer = optim.SGD
+    elif args.optimizer == 'Adam':
+        optimizer = optim.Adam
+    else:
+        raise ValueError(f'Optimizer {args.optimizer} is not a valid option')
+    optimizer = optimizer(quadrotor_controller_module.parameters(), lr=args.lr)
 
-    for epoch in range(epochs):
-        train_quadrotor_controller_module(model=quadrotor_controller_module, criterion=criterion, optimizer=optimizer, trainloader=train_dataloader)
-        if report_gains:
-            print(f"Gains after {epoch+1} epochs:\nkp={quadrotor_controller_module.kv.item()}\tkv={quadrotor_controller_module.kv.item()}\tkw={quadrotor_controller_module.kw.item()}\tkr={quadrotor_controller_module.kr.item()}")
+    if args.track:
+        writer = SummaryWriter(f"runs/parameters__{int(time.time())}")
+    else:
+        writer = None
 
-    if visualize_trajectory:
-        ax = plt.figure().add_subplot(projection='3d')
+    if args.double_window_size_on_plateau:
+        best_loss = torch.inf
+        iterations_since_decrease = 0
+
+    for epoch in range(args.epochs):
+        position_loss, velocity_loss, rotational_loss, omega_loss = train_quadrotor_controller_module(model=quadrotor_controller_module, criterion=criterion, optimizer=optimizer, trainloader=train_dataloader, writer=writer)
+        loss = position_loss + velocity_loss + rotational_loss + omega_loss
+
+        if writer is not None:
+            writer.add_scalar("loss/position_loss", position_loss, global_step=epoch)
+            writer.add_scalar("loss/velocity_loss", velocity_loss, global_step=epoch)
+            writer.add_scalar("loss/rotational_loss", rotational_loss, global_step=epoch)
+            writer.add_scalar("loss/omega_loss", omega_loss, global_step=epoch)
+            writer.add_scalar("parameters/window_size", args.window_size, global_step=epoch)
+            writer.add_scalars("gains/kp", {'x': quadrotor_controller_module.kp[0], 'y': quadrotor_controller_module.kp[1], 'z': quadrotor_controller_module.kp[2]}, global_step=epoch)
+            writer.add_scalars("gains/kv", {'x': quadrotor_controller_module.kv[0], 'y': quadrotor_controller_module.kv[1], 'z': quadrotor_controller_module.kv[2]}, global_step=epoch)
+            writer.add_scalars("gains/kr", {'x': quadrotor_controller_module.kr[0], 'y': quadrotor_controller_module.kr[1], 'z': quadrotor_controller_module.kr[2]}, global_step=epoch)
+            writer.add_scalars("gains/kw", {'x': quadrotor_controller_module.kw[0], 'y': quadrotor_controller_module.kw[1], 'z': quadrotor_controller_module.kw[2]}, global_step=epoch)
+
+        if args.double_window_size_on_plateau:
+            if loss < best_loss:
+                best_loss = loss
+                iterations_since_decrease = 0
+            else:
+                iterations_since_decrease += 1
+            
+            if iterations_since_decrease > 10:
+                args.window_size *= 2
+                if args.window_size > 800:
+                    args.window_size = 800
+                figure8_dataset.slice_into_windows(window_size=args.window_size)
+                iterations_since_decrease = 0
+                best_loss = torch.inf
+
+        if args.report_gains:
+            with torch.no_grad():
+                print(f"Gains after {epoch+1} epochs:\nkp={quadrotor_controller_module.kp.tolist()}\tkv={quadrotor_controller_module.kv.tolist()}\tkw={quadrotor_controller_module.kw.tolist()}\tkr={quadrotor_controller_module.kr.tolist()}")
+    if writer is not None: 
+        writer.close()
+
+    if args.visualize_trajectory or args.plot_errors:
         setpoint_trajectory = torch.tensor(figure8_dataset.to_setpoint(figure8_dataset.trajectory_data), dtype=torch.double)
-        states = run_trajectory(quadrotor_controller_module, setpoint_trajectory)
+        states, Rds, desWs = run_trajectory(quadrotor_controller_module, setpoint_trajectory)
+
+    if args.visualize_trajectory:
+        ax = plt.figure().add_subplot(projection='3d')
         ax.plot(states[:,0], states[:,1], states[:,2], label='simulated trajectory')
         ax.plot(setpoint_trajectory[:,0],setpoint_trajectory[:,1], setpoint_trajectory[:,2], label='desired trajectory')
         ax.legend()
@@ -203,3 +302,7 @@ if __name__=="__main__":
         ax.set_zlabel('Z')
         ax.view_init(elev=20, azim=-35, roll=0)
         plt.show()
+    
+    if args.plot_errors:
+        # plot errors
+        pass

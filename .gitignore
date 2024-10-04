@@ -7,3 +7,6 @@ __pycache__
 *.csv
 *.pt
 *.npy
+
+# log data
+/runs

@@ -22,5 +22,7 @@ An example of the dataset creation and the simulation loop can be run with:
 python train_lee_controller.py
 ```
 
-TODO: The script `train_lee_controller.py` should use CLI arguments specifing parameters like time step `dt`, window length `window_length`, learning rate `lr`, batch size `batch_size`, loss function `loss_fn` and coefficient file `coeff_file`.
-TODO: Check out gradient clipping for stabilization of the training.
+The script `train_lee_controller.py` supports different CLI arguments. For a detailed list have a look at the help menu:
+```
+python train_lee_controller.py -h
+```

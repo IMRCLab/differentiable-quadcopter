@@ -28,8 +28,8 @@ class ControllerLee():
         """
         super().__init__()
         self.uavModel = uavModel # the model the controller controls
-        self.m = torch.tensor(uavModel.m, dtype=torch.double)
-        self.I = torch.tensor(uavModel.I, dtype=torch.double)
+        self.m = uavModel.m.clone().detach()
+        self.I = uavModel.I.clone().detach()
         if self.I.dim() == 1:
             self.I = torch.diag(self.I)
     
@@ -89,7 +89,7 @@ class ControllerLee():
         normFd = torch.linalg.norm(Fd, dim=(-2,-1),keepdim=True)
         zdes = torch.zeros_like(Fd)
         zdes_mask = normFd.squeeze((-2,-1)) > 0
-        zdes[zdes_mask] = Fd / normFd
+        zdes[zdes_mask] = (Fd / normFd)[zdes_mask]
         zdes[~zdes_mask] = torch.tensor([[0],[0],[1]], dtype=Fd.dtype)
         
         xcdes = torch.zeros((batch_size,3,1), dtype=Fd.dtype)
@@ -99,7 +99,7 @@ class ControllerLee():
 
         ydes = torch.zeros_like(Fd)
         ydes_mask = normZX > 0
-        ydes[ydes_mask] = torch.cross(zdes, xcdes, dim=-2)
+        ydes[ydes_mask] = torch.cross(zdes, xcdes, dim=-2)[ydes_mask]
         ydes[~ydes_mask] = torch.tensor([[0],[1],[0]], dtype=Fd.dtype)
         
         xdes = torch.cross(ydes, zdes, dim=-2)
