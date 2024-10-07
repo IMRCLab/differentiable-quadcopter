@@ -1,0 +1,22 @@
+name: Benchmark
+on:
+  # manual trigger
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: self-hosted
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+
+    - name: Run Benchmark
+      run: |
+        cd ${{github.workspace}}
+        python3 train_lee_controller.py
+
+    - uses: actions/upload-artifact@v3
+      with:
+        name: results
+        path: results/
