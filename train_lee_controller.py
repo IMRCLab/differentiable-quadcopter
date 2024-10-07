@@ -213,11 +213,11 @@ if __name__=="__main__":
                         help='name of the file which contains the parameters for the trajectory splines')
     parser.add_argument('--dt', type=float, default=1/100,
                         help='duration of a simulation step in seconds')
-    parser.add_argument('--lr', type=float, default=1e-3,
+    parser.add_argument('--lr', type=float, default=5e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--batch-size', type=int, default=8,
                         help='the size of the batches for training')
-    parser.add_argument('--epochs', type=int, default=0,
+    parser.add_argument('--epochs', type=int, default=500,
                         help='the number of epochs to run the optimization')
     parser.add_argument('--window-size', type=int, default=4,
                         help='the length of the time windows the trajectory is cut into for training')
@@ -248,8 +248,8 @@ if __name__=="__main__":
 
     train_dataloader = DataLoader(figure8_dataset, batch_size=args.batch_size, shuffle=True)
     # quadrotor_controller_module = QuadrotorControllerModule(dt=dt, kp=[[9.],[9.],[9.]], kv=[[7.],[7.],[7.]], kw=[[0.0013],[0.0013],[0.0013]], kr=[[0.0055],[0.0055],[0.0055]])
-    # quadrotor_controller_module = QuadrotorControllerModule(dt=args.dt, kp=[[1.],[1.],[1.]], kv=[[1.],[1.],[1.]], kw=[[1.],[1.],[1.]], kr=[[1.],[1.],[1.]], noise_on=args.sim_noise)
-    quadrotor_controller_module = QuadrotorControllerModule(dt=args.dt, kp=[[0.8557730652819432], [1.0935266831827213], [1.1378830690574784]], kv=[[1.0499406668079418], [1.1435798304026576], [1.0953624603085077]], kw=[[0.003153056642205069], [0.001154707110528682], [0.005679290258691776]], kr=[[0.01928796833157137], [0.017564737652027082], [0.08202443114730949]], noise_on=args.sim_noise)
+    quadrotor_controller_module = QuadrotorControllerModule(dt=args.dt, kp=[[1.],[1.],[1.]], kv=[[1.],[1.],[1.]], kw=[[1.],[1.],[1.]], kr=[[1.],[1.],[1.]], noise_on=args.sim_noise)
+    # quadrotor_controller_module = QuadrotorControllerModule(dt=args.dt, kp=[[0.8557730652819432], [1.0935266831827213], [1.1378830690574784]], kv=[[1.0499406668079418], [1.1435798304026576], [1.0953624603085077]], kw=[[0.003153056642205069], [0.001154707110528682], [0.005679290258691776]], kr=[[0.01928796833157137], [0.017564737652027082], [0.08202443114730949]], noise_on=args.sim_noise)
     criterion = QuadrotorControllerLoss(loss_fn=args.loss_fn)
     if args.optimizer == 'SGD':
         optimizer = optim.SGD

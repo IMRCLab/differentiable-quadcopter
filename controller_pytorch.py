@@ -29,8 +29,16 @@ class ControllerLee():
             inertia of the UAV to be controlled
         """
         super().__init__()
-        self.m = torch.tensor(mass)
-        self.I = torch.tensor(inertia)
+        if isinstance(mass, torch.Tensor):
+            self.m = mass.clone().detach()
+        else:
+            self.m = torch.tensor(mass)
+        
+        if isinstance(inertia, torch.Tensor):
+            self.I = inertia.clone().detach()
+        else:
+            self.I = torch.tensor(inertia)
+
         if self.I.dim() == 1:
             self.I = torch.diag(self.I)
     
