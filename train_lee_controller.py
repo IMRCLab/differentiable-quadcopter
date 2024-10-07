@@ -231,9 +231,16 @@ if __name__=="__main__":
                         help='if provided the model parameters are loaded from this file')
     parser.add_argument('--save-checkpoint-file', type=str, default=None,
                         help='if provided the modle parameters are saved to this file')
+    parser.add_argument('--position-weight', type=float, default=1.,
+                        help='weight for the position loss')
+    parser.add_argument('--velocity-weight', type=float, default=1.,
+                        help='weight for the velocity loss')
+    parser.add_argument('--rotational-weight', type=float, default=1.,
+                        help='weight for the rotational loss')
+    parser.add_argument('--omega-weight', type=float, default=1.,
+                        help='weight for the omega loss')
     args = parser.parse_args()
     
-
     # write custom transform to create setpoint
     figure8_dataset = NthOrderTrajectoryDataset('figure8.csv', [f, fdot, fdotdot, fdotdotdot], dt=args.dt, transform=torch.tensor)
     figure8_dataset.slice_into_windows(window_size=args.window_size)
@@ -278,7 +285,7 @@ if __name__=="__main__":
 
     for epoch in range(start_epoch, args.epochs):
         position_loss, velocity_loss, rotational_loss, omega_loss = train_quadrotor_controller_module(model=quadrotor_controller_module, criterion=criterion, optimizer=optimizer, trainloader=train_dataloader, writer=writer)
-        loss = position_loss + velocity_loss + rotational_loss + omega_loss
+        loss = args.position_weight * position_loss + args.velocity_weight * velocity_loss + args.rotational_weight * rotational_loss + args.omega_weight * omega_loss
 
         if writer is not None:
             writer.add_scalar("loss/position_loss", position_loss, global_step=epoch)
