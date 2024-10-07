@@ -1,4 +1,5 @@
 import argparse
+import os
 import time
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -20,11 +21,23 @@ import matplotlib.pyplot as plt
 
 
 class QuadrotorControllerModule(nn.Module):
-    def __init__(self, dt, kp=1., kv=1., kw=1., kr=1., noise_on=False):
+    def __init__(self, dt, kp=1., kv=1., kw=1., kr=1., mass=None, inertia=None, noise_on=False):
         super().__init__()
         self.quadrotor = QuadrotorAutograd(noise_on=noise_on)
         self.quadrotor.dt = dt
-        self.controller = ControllerLee(uavModel=self.quadrotor, kp=kp, kv=kv, kw=kw, kr=kr)
+
+        # If mass and inertia are given initialize controller accordingly
+        if mass is not None and inertia is not None:
+            self.controller = ControllerLee(kp=kp, kv=kv, kw=kw, kr=kr, mass=mass, inertia=inertia)
+            self.mass = nn.Parameter(self.controller.m.clone().detach().requires_grad_(True))
+            self.inertia = nn.Parameter(self.controller.I.clone().detach().requires_grad_(True))
+        else:
+            self.controller = ControllerLee(kp=kp, kv=kv, kw=kw, kr=kr, mass=self.quadrotor.m, inertia=self.quadrotor.I)
+            self.mass = nn.Parameter(self.controller.m.clone().detach(), requires_grad=False)
+            self.inertia = nn.Parameter(self.controller.I.clone().detach(), requires_grad=False)
+
+        self.controller.m = self.mass
+        self.controller.I = self.inertia
 
         self.kp = nn.Parameter(self.controller.kp.clone().detach().requires_grad_(True))
         self.kv = nn.Parameter(self.controller.kv.clone().detach().requires_grad_(True))
@@ -182,7 +195,7 @@ def run_trajectory(model, trajectory, s_0=None):
     model.eval()
     with torch.no_grad():
         states, Rds, desWs = model(trajectory.unsqueeze(1), s_0=s_0)
-    return states.squeeze(1), Rds.squeeze(1), desWs.squeeze(q)
+    return states.squeeze(1), Rds.squeeze(1), desWs.squeeze(1)
 
 
 
@@ -222,7 +235,10 @@ if __name__=="__main__":
                         help='if toggled, the simulation will be run with noise')
     parser.add_argument('--double-window-size-on-plateau', type=lambda x: bool(strtobool(x)), default=True,
                         help='if toggled, the window size will double if the training loss does not decrease any more')
-                
+    parser.add_argument('--model-checkpoint-file', type=str, default=None,
+                        help='if provided the model parameters are loaded from this file')
+    parser.add_argument('--save-checkpoint-file', type=str, default=None,
+                        help='if provided the modle parameters are saved to this file')
     args = parser.parse_args()
     
 
@@ -241,18 +257,34 @@ if __name__=="__main__":
         optimizer = optim.Adam
     else:
         raise ValueError(f'Optimizer {args.optimizer} is not a valid option')
+
     optimizer = optimizer(quadrotor_controller_module.parameters(), lr=args.lr)
 
+    if args.save_checkpoint_file:
+        run_name = args.save_checkpoint_file
+        os.makedirs("checkpoints", exist_ok=True)
+    else:
+        run_name = f'lee_controller__{int(time.time())}'
+
     if args.track:
-        writer = SummaryWriter(f"runs/parameters__{int(time.time())}")
+        writer = SummaryWriter(f"runs/parameters_{run_name}")
     else:
         writer = None
 
     if args.double_window_size_on_plateau:
         best_loss = torch.inf
         iterations_since_decrease = 0
+    
+    if args.model_checkpoint_file:
+        checkpoint = torch.load(f'checkpoints/{args.model_checkpoint_file}', weights_only=True)
+        quadrotor_controller_module.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch']
+        args.window_size = checkpoint['window_size']
+    else:
+        start_epoch = 0
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         position_loss, velocity_loss, rotational_loss, omega_loss = train_quadrotor_controller_module(model=quadrotor_controller_module, criterion=criterion, optimizer=optimizer, trainloader=train_dataloader, writer=writer)
         loss = position_loss + velocity_loss + rotational_loss + omega_loss
 
@@ -266,6 +298,8 @@ if __name__=="__main__":
             writer.add_scalars("gains/kv", {'x': quadrotor_controller_module.kv[0], 'y': quadrotor_controller_module.kv[1], 'z': quadrotor_controller_module.kv[2]}, global_step=epoch)
             writer.add_scalars("gains/kr", {'x': quadrotor_controller_module.kr[0], 'y': quadrotor_controller_module.kr[1], 'z': quadrotor_controller_module.kr[2]}, global_step=epoch)
             writer.add_scalars("gains/kw", {'x': quadrotor_controller_module.kw[0], 'y': quadrotor_controller_module.kw[1], 'z': quadrotor_controller_module.kw[2]}, global_step=epoch)
+            # writer.add_scalar("physical_parameters/mass", quadrotor_controller_module.mass, global_step=epoch)
+            # writer.add_scalar("physical_parameters/inertia", quadrotor_controller_module.inertia, global_step=epoch)
 
         if args.double_window_size_on_plateau:
             if loss < best_loss:
@@ -282,9 +316,18 @@ if __name__=="__main__":
                 iterations_since_decrease = 0
                 best_loss = torch.inf
 
+        if args.save_checkpoint_file is not None: 
+            # save gains/model
+            torch.save({'epoch': epoch,
+                        'model_state_dict': quadrotor_controller_module.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'window_size': args.window_size,
+                        }, f'checkpoints/{run_name}.pt')
+
         if args.report_gains:
             with torch.no_grad():
                 print(f"Gains after {epoch+1} epochs:\nkp={quadrotor_controller_module.kp.tolist()}\tkv={quadrotor_controller_module.kv.tolist()}\tkw={quadrotor_controller_module.kw.tolist()}\tkr={quadrotor_controller_module.kr.tolist()}")
+
     if writer is not None: 
         writer.close()
 

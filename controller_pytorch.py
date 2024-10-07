@@ -17,19 +17,20 @@ def vee_so3(R:torch.Tensor):
                               R[...,1,0]-R[...,0,1]], axis=-1)
 
 class ControllerLee():
-    def __init__(self, uavModel, kp=1., kv=1., kw=1., kr=1.):
+    def __init__(self, kp=1., kv=1., kw=1., kr=1., mass=1., inertia=[1.,1.,1.]):
         """
         Parameters:
         -----------
-        uavModel:
-            model of the UAV to be controlled
         kp, kv, kw, kr: float
             gains of the controller
+        mass: float
+            mass of the UAV to be controlled
+        inertia: array
+            inertia of the UAV to be controlled
         """
         super().__init__()
-        self.uavModel = uavModel # the model the controller controls
-        self.m = uavModel.m.clone().detach()
-        self.I = uavModel.I.clone().detach()
+        self.m = torch.tensor(mass)
+        self.I = torch.tensor(inertia)
         if self.I.dim() == 1:
             self.I = torch.diag(self.I)
     
@@ -39,10 +40,6 @@ class ControllerLee():
         self.kw = torch.tensor(kw)
         self.kr = torch.tensor(kr)
 
-    def updateUAVModel(self, uavModel):
-        self.m = torch.tensor(uavModel.m, dtype=torch.double)
-        self.I = torch.tensor(uavModel.I, dtype=torch.double)
-    
     def thrustCtrl(self, R:torch.Tensor, refAcc:torch.Tensor, ep:torch.Tensor, ev:torch.Tensor):
         """
         Computes the total thrust f.
