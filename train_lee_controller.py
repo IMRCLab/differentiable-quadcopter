@@ -346,6 +346,3 @@ if __name__=="__main__":
         ax.view_init(elev=20, azim=-35, roll=0)
         plt.show()
     
-    if args.plot_errors:
-        # plot errors
-        pass
