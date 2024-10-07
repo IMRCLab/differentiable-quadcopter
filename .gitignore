@@ -4,8 +4,6 @@ __pycache__
 .vscode/
 
 # generated data
-*.csv
-*.pt
 *.npy
 
 # log data
