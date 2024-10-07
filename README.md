@@ -26,3 +26,11 @@ The script `train_lee_controller.py` supports different CLI arguments. For a det
 ```
 python train_lee_controller.py -h
 ```
+
+## Evaluation of the controller in simulation
+The script `evaluate_lee_controller.py` contains the necessary code to evaluate fitted gains against some baseline gains. The evaluation runs on a couple of trajectories. So far a helix, a circle, the figure 8 and and random waypoints are included. By default the results include the parameters and the losses for the models on different trajectory. The results are written to the `results.yaml` file and stored in the folder `results`. Figures of the trajectories are saved in the folder `figures` within the `results` folder.
+
+To run the evaluation simply execute the evaluation script:
+```
+python evaluate_lee_controller.py
+```

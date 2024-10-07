@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 
 
 class QuadrotorControllerModule(nn.Module):
-    def __init__(self, dt, kp=1., kv=1., kw=1., kr=1., mass=None, inertia=None, noise_on=False):
+    def __init__(self, dt, kp=[[1.],[1.],[1.]], kv=[[1.],[1.],[1.]], kw=[[1.],[1.],[1.]], kr=[[1.],[1.],[1.]], mass=None, inertia=None, noise_on=False):
         super().__init__()
         self.quadrotor = QuadrotorAutograd(noise_on=noise_on)
         self.quadrotor.dt = dt
@@ -195,25 +195,17 @@ def run_trajectory(model, trajectory, s_0=None):
     model.eval()
     with torch.no_grad():
         states, Rds, desWs = model(trajectory.unsqueeze(1), s_0=s_0)
-    return states.squeeze(1), Rds.squeeze(1), desWs.squeeze(1)
+    return states.squeeze(1), Rds.squeeze(1), desWs.squeeze()
 
 
 
 if __name__=="__main__":
-    # figure8_data = pd.read_csv('figure8.csv')
-    # dt = 1/100 # 50hz control frequency
-    # lr = 10000
-    # epochs = 1000
-    # visualize_trajectory = True
-    # report_gains = True
-    # window_size = 400
-
     parser = argparse.ArgumentParser()
     parser.add_argument('--parameter-file', type=str, default='figure8.csv',
                         help='name of the file which contains the parameters for the trajectory splines')
     parser.add_argument('--dt', type=float, default=1/100,
                         help='duration of a simulation step in seconds')
-    parser.add_argument('--lr', type=float, default=5e-4,
+    parser.add_argument('--lr', type=float, default=1e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--batch-size', type=int, default=8,
                         help='the size of the batches for training')
