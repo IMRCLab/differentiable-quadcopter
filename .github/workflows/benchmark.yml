@@ -14,7 +14,7 @@ jobs:
     - name: Run Benchmark
       run: |
         cd ${{github.workspace}}
-        python3 benchmark.py
+        python3 train_lee_controller.py
 
     - uses: actions/upload-artifact@v3
       with:
