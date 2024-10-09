@@ -19,7 +19,7 @@ The file also contains a custom dataset class `NthOrderTrajectoryDataset` which 
 
 An example of the dataset creation and the simulation loop can be run with:
 ```
-python train_lee_controller.py --epochs 1000 --lr 1e-4 --track
+python train_lee_controller.py --epochs 5000 --lr 1e-3 --track
 ```
 
 The script `train_lee_controller.py` supports different CLI arguments. For a detailed list have a look at the help menu:

@@ -163,7 +163,7 @@ class NthOrderTrajectoryDataset(Dataset):
         return np.concat([window[...,0,0:3], window[...,1,0:3], window[...,2,0:3], window[...,3,0:3], window[...,0,3:4]], axis=-1)
 
     
-def train_quadrotor_controller_module(model, criterion, optimizer, trainloader, writer=None):
+def train_quadrotor_controller_module(model, criterion, optimizer, trainloader, writer=None, clip_gradient_norm=0.5):
     running_loss, running_position_loss, running_velocity_loss, running_rotational_loss, running_omega_loss = 0.0, 0.0, 0.0, 0.0, 0.0
 
     pbar = tqdm(total=len(trainloader))
@@ -174,7 +174,7 @@ def train_quadrotor_controller_module(model, criterion, optimizer, trainloader, 
         position_loss, velocity_loss, rotational_loss, omega_loss = criterion(states.transpose(0,1), setpoints, Rds.transpose(0,1), desWs.squeeze(-1).transpose(0,1))
         loss = position_loss + velocity_loss + rotational_loss + omega_loss
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), 1.)
+        nn.utils.clip_grad_norm_(model.parameters(), clip_gradient_norm)
         optimizer.step()
 
         with torch.no_grad():
@@ -205,13 +205,13 @@ if __name__=="__main__":
                         help='name of the file which contains the parameters for the trajectory splines')
     parser.add_argument('--dt', type=float, default=1/100,
                         help='duration of a simulation step in seconds')
-    parser.add_argument('--lr', type=float, default=1e-4,
+    parser.add_argument('--lr', type=float, default=1e-3,
                         help='the learning rate of the optimizer')
     parser.add_argument('--batch-size', type=int, default=8,
                         help='the size of the batches for training')
     parser.add_argument('--epochs', type=int, default=500,
                         help='the number of epochs to run the optimization')
-    parser.add_argument('--window-size', type=int, default=4,
+    parser.add_argument('--window-size', type=int, default=3,
                         help='the length of the time windows the trajectory is cut into for training')
     parser.add_argument('--visualize-trajectory', type=lambda x: bool(strtobool(x)) ,default=True,
                         help='Toggles whether or not the trajectory should be visualized after training')
@@ -227,6 +227,8 @@ if __name__=="__main__":
                         help='if toggled, the simulation will be run with noise')
     parser.add_argument('--double-window-size-on-plateau', type=lambda x: bool(strtobool(x)), default=True,
                         help='if toggled, the window size will double if the training loss does not decrease any more')
+    parser.add_argument('--num-epochs-plateau', type=int, default=50,
+                        help='number of epochs to wait on plateau before window size is doubled')
     parser.add_argument('--model-checkpoint-file', type=str, default=None,
                         help='if provided the model parameters are loaded from this file')
     parser.add_argument('--save-checkpoint-file', type=str, default=None,
@@ -280,6 +282,8 @@ if __name__=="__main__":
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch']
         args.window_size = checkpoint['window_size']
+        figure8_dataset.slice_into_windows(args.window_size)
+        print(f'Resuming training of {args.model_checkpoint_file} at epoch {start_epoch}')
     else:
         start_epoch = 0
 
@@ -307,7 +311,7 @@ if __name__=="__main__":
             else:
                 iterations_since_decrease += 1
             
-            if iterations_since_decrease > 10:
+            if iterations_since_decrease > args.num_epochs_plateau:
                 args.window_size *= 2
                 if args.window_size > 800:
                     args.window_size = 800
