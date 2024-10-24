@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data.dataset import TensorDataset
 from data import cfusdlog
 from quadrotor_pytorch import QuadrotorAutograd 
-from controller_pytorch import vee_so3
+from utils import vee_so3
 
 import torch
 from torch import nn
@@ -71,7 +71,7 @@ class QuadrotorLoss(nn.Module):
         # angle_errors = qsym_distance(input[:, 6:10], target[:, 6:10])
         R_input = roma.unitquat_to_rotmat(input[...,6:10])
         R_target = roma.unitquat_to_rotmat(target[...,6:10])
-        angle_errors = 0.5 * vee_so3(R_target.tranpose(-2,-1) @ R_input - R_input.transpose(-2,-1) @ R_target)
+        angle_errors = 0.5 * vee_so3(R_target.transpose(-2,-1) @ R_input - R_input.transpose(-2,-1) @ R_target)
         angle_loss = torch.mean(angle_errors)
         omega_loss = torch.nn.functional.mse_loss(input[:,10:13], target[:,10:13])
         # print(f"position_loss: {position_loss} \tvelocity_loss: {velocity_loss} \tangle_loss: {angle_loss} \tomega_loss: {omega_loss}")
@@ -276,7 +276,7 @@ if __name__ == '__main__':
     test_dataloader = DataLoader(test_data, batch_size=1024)
 
 
-    model = QuadrotorModule(dt, mass=1.)
+    model = QuadrotorModule(dt)
 
     # loss_fn = nn.MSELoss()
     loss_fn = QuadrotorLoss()
