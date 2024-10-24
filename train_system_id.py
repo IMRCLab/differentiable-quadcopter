@@ -1,11 +1,14 @@
 import argparse
+import os
 import re
+import roma
 import numpy as np
 import matplotlib.pyplot as plt
 
 from torch.utils.data.dataset import TensorDataset
 from data import cfusdlog
 from quadrotor_pytorch import QuadrotorAutograd 
+from controller_pytorch import vee_so3
 
 import torch
 from torch import nn
@@ -13,9 +16,9 @@ from torch.utils.data import DataLoader
 
 
 class QuadrotorModule(nn.Module):
-    def __init__(self, dt):
+    def __init__(self, dt, **kwargs):
         super(QuadrotorModule, self).__init__()
-        self.quad = QuadrotorAutograd()
+        self.quad = QuadrotorAutograd(**kwargs)
         self.quad.dt = dt
 
         # optimize mass
@@ -65,7 +68,10 @@ class QuadrotorLoss(nn.Module):
         # print(input, target)
         position_loss = torch.nn.functional.mse_loss(input[:,0:3], target[:,0:3])
         velocity_loss = torch.nn.functional.mse_loss(input[:,3:6], target[:,3:6])
-        angle_errors = qsym_distance(input[:, 6:10], target[:, 6:10])
+        # angle_errors = qsym_distance(input[:, 6:10], target[:, 6:10])
+        R_input = roma.unitquat_to_rotmat(input[...,6:10])
+        R_target = roma.unitquat_to_rotmat(target[...,6:10])
+        angle_errors = 0.5 * vee_so3(R_target.tranpose(-2,-1) @ R_input - R_input.transpose(-2,-1) @ R_target)
         angle_loss = torch.mean(angle_errors)
         omega_loss = torch.nn.functional.mse_loss(input[:,10:13], target[:,10:13])
         # print(f"position_loss: {position_loss} \tvelocity_loss: {velocity_loss} \tangle_loss: {angle_loss} \tomega_loss: {omega_loss}")
@@ -244,29 +250,33 @@ def load_dataset(file_name):
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("file_train", type=str)
-    parser.add_argument("file_test", type=str)
+    parser.add_argument("--data-dir", type=str, default="data")
+    parser.add_argument("--file-train", type=str, default='figure8_100hz')
+    parser.add_argument("--file-test", type=str, default='hover_100hz')
     args = parser.parse_args()
 
-    if args.file_train.endswith('.csv'):
-        dt, training_data = load_csv(args.file_train)
-    elif args.file_train.endswith('.pt'):
-        dt, training_data = load_dataset(args.file_train)
+    train_file_path = os.path.join(args.data_dir, args.file_train)
+    test_file_path = os.path.join(args.data_dir, args.file_test)
+
+    if train_file_path.endswith('.csv'):
+        dt, training_data = load_csv(train_file_path)
+    elif train_file_path.endswith('.pt'):
+        dt, training_data = load_dataset(train_file_path)
     else:
-        dt, training_data = load(args.file_train)
+        dt, training_data = load(train_file_path)
     
-    if args.file_test.endswith('.csv'):
-        dt2, test_data = load_csv(args.file_test)
-    elif args.file_test.endswith('.pt'):
-        dt2, test_data = load_dataset(args.file_test)
+    if test_file_path.endswith('.csv'):
+        dt2, test_data = load_csv(test_file_path)
+    elif test_file_path.endswith('.pt'):
+        dt2, test_data = load_dataset(test_file_path)
     else:
-        dt2, test_data = load(args.file_test)
+        dt2, test_data = load(test_file_path)
 
     train_dataloader = DataLoader(training_data, batch_size=1024, shuffle=True)
     test_dataloader = DataLoader(test_data, batch_size=1024)
 
 
-    model = QuadrotorModule(dt)
+    model = QuadrotorModule(dt, mass=1.)
 
     # loss_fn = nn.MSELoss()
     loss_fn = QuadrotorLoss()

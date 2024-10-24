@@ -66,7 +66,7 @@ def qnormalize(q):
 
 class QuadrotorAutograd():
 
-	def __init__(self, noise_on=False):
+	def __init__(self, noise_on=False, mass=0.034, inertia=[16.571710e-6, 16.655602e-6, 29.261652e-6]):
 		self.min_u = 0
 		self.max_u = 12 / 1000 * 9.81
 
@@ -78,13 +78,13 @@ class QuadrotorAutograd():
 		self.max_x = -self.min_x
 
 		# parameters (Crazyflie 2.0 quadrotor)
-		self.m = torch.tensor(0.034, dtype=torch.double) # true mass in kg
+		self.m = torch.tensor(mass, dtype=torch.double) # true mass in kg
 		# self.I = np.array([
 		# 	[16.56,0.83,0.71],
 		# 	[0.83,16.66,1.8],
 		# 	[0.72,1.8,29.26]
 		# 	]) * 1e-6  # kg m^2
-		self.I = torch.tensor([16.571710e-6, 16.655602e-6, 29.261652e-6], dtype=torch.double)
+		self.I = torch.tensor(inertia, dtype=torch.double)
 		# self.I = torch.tensor([1.05, 1.0, .95], dtype=torch.float64)
 
 		# Note: we assume here that our control is forces
