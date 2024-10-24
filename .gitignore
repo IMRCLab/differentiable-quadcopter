@@ -5,6 +5,8 @@ __pycache__
 
 # generated data
 *.npy
+/checkpoints
+/results
 
 # log data
 /runs

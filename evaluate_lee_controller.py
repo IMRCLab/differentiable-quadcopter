@@ -1,3 +1,4 @@
+import argparse
 import matplotlib.pyplot as plt
 import os
 import roma
@@ -5,8 +6,8 @@ import torch
 import yaml
 
 from train_lee_controller import QuadrotorControllerModule, NthOrderTrajectoryDataset, run_trajectory
-from train_system_id import qsym_distance
 from trajectories import f, fdot, fdotdot, fdotdotdot
+from controller_pytorch import vee_so3
 
 def load_model():
     pass
@@ -20,7 +21,10 @@ def compute_errors(setpoints, states, desRs, desWs, error_fn='MSE'):
         raise ValueError(f'Error function {error_fn} is not supported')
     position_error = error_fn(states[...,0:3], setpoints[..., 0:3])
     velocity_error = error_fn(states[...,3:6], setpoints[..., 3:6])
-    rotational_error = qsym_distance(roma.rotmat_to_unitquat(desRs), states[..., 6:10])
+    # rotational_error = qsym_distance(roma.rotmat_to_unitquat(desRs), states[..., 6:10])
+    R = roma.unitquat_to_rotmat(states[..., 6:10])
+    er = 0.5 * vee_so3(desRs.transpose(-2,-1) @ R - R.transpose(-2,-1) @ desRs) # tracking error in rotation
+    rotational_error = er**2
     omega_error = error_fn(states[..., 10:13], desWs)
 
     return position_error, velocity_error, rotational_error, omega_error
@@ -36,6 +40,10 @@ def plot_error_trajectory():
     pass
 
 if __name__=="__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model-name', type=str, default='lee_controller_best_run',
+                        help='name of the file containing the model which should be evaluated')
+    args = parser.parse_args()
     result_dir = 'results'
     os.makedirs(result_dir, exist_ok=True)
     os.makedirs(result_dir+'/figures', exist_ok=True)
@@ -45,7 +53,7 @@ if __name__=="__main__":
     dt = 1/100 # 100Hz
     # 1. load model from checkpoint
     model = QuadrotorControllerModule(dt=dt)
-    checkpoints = torch.load('checkpoints/lee_controller_best_run.pt', weights_only=True)
+    checkpoints = torch.load(f'checkpoints/{args.model_name}.pt', weights_only=True)
     model.load_state_dict(checkpoints['model_state_dict'])
 
     # 2. create baseline model
@@ -65,7 +73,7 @@ if __name__=="__main__":
             'kw': model.kw.squeeze().tolist(),
         }
     }
-    with open(f'{result_dir}/results.yaml', 'w') as file:
+    with open(f'{result_dir}/results_{args.model_name}.yaml', 'w') as file:
         yaml.safe_dump(result_dict, file)
     
     # 3. run model and baseline for trajectories
@@ -144,7 +152,7 @@ if __name__=="__main__":
             }
         }
 
-        with open(f'{result_dir}/results.yaml', 'a') as file:
+        with open(f'{result_dir}/results_{args.model_name}.yaml', 'a') as file:
             yaml.safe_dump(error_dict, file)
 
         # generate plots
@@ -158,4 +166,4 @@ if __name__=="__main__":
         ax.set_zlabel('Z')
         ax.view_init(elev=20, azim=-35, roll=0)
         plt.tight_layout()
-        plt.savefig(f'{result_dir}/figures/trajectory_{environment_name}.png')
+        plt.savefig(f'{result_dir}/figures/trajectory_{environment_name}_{args.model_name}.png')

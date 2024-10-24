@@ -14,6 +14,7 @@ from trajectories import spline_segment, f, fdot, fdotdot, fdotdotdot
 from torch import optim
 from train_system_id import qsym_distance
 from tqdm import tqdm
+from controller_pytorch import vee_so3
 
 from torch.utils.data import Dataset, DataLoader
 
@@ -61,7 +62,7 @@ class QuadrotorControllerModule(nn.Module):
             batch of setpoints with shape (T,B,S) where B is the batch size, T is the trajectory length and S is the setpoint dimension.
 
         s_0: torch.Tensor (optional)
-            tensor with initial states with shape (B,X) where B is the batch size and X is the state dimension.
+            tensor with initial states with shape (B,X) where B is the batch size and X is the state dimension. State format is [x,y,z, v_x, v_y, v_z, q_w, q_x, q_y, q_z, omega_x, omega_y, omega_z]
 
         Returns:
         --------
@@ -108,7 +109,10 @@ class QuadrotorControllerLoss(nn.Module):
     def forward(self, states, setpoints, desR, desW):
         position_loss = self.loss_fn(states[...,0:3], setpoints[...,0:3])
         velocity_loss = self.loss_fn(states[...,3:6], setpoints[...,3:6])
-        rotational_loss = torch.mean(qsym_distance(roma.rotmat_to_unitquat(desR), states[...,6:10]))
+        # rotational_loss = torch.mean(qsym_distance(roma.rotmat_to_unitquat(desR), states[...,6:10]))
+        R = roma.unitquat_to_rotmat(states[..., 6:10])
+        er = 0.5 * vee_so3(desR.transpose(-2,-1) @ R - R.transpose(-2,-1) @ desR) # tracking error in rotation
+        rotational_loss = torch.mean(er**2)
         omega_loss = self.loss_fn(desW, states[...,10:13])
         return (position_loss, velocity_loss, rotational_loss, omega_loss)
         
@@ -160,10 +164,11 @@ class NthOrderTrajectoryDataset(Dataset):
         self.data = np.stack(splits, axis=0) # num_windows x window_size x num_spline_order x pose_size
     
     def to_setpoint(self, window):
+        # setpoint format: [x,y,z, v_x, v_y, v_z, a_x, a_y, a_z, jerk_x, jerk_y, jerk_z, yaw]
         return np.concat([window[...,0,0:3], window[...,1,0:3], window[...,2,0:3], window[...,3,0:3], window[...,0,3:4]], axis=-1)
 
     
-def train_quadrotor_controller_module(model, criterion, optimizer, trainloader, writer=None, clip_gradient_norm=0.5):
+def train_quadrotor_controller_module(model, criterion, optimizer, trainloader, writer=None, clip_gradient_norm=1.0):
     running_loss, running_position_loss, running_velocity_loss, running_rotational_loss, running_omega_loss = 0.0, 0.0, 0.0, 0.0, 0.0
 
     pbar = tqdm(total=len(trainloader))
@@ -174,7 +179,10 @@ def train_quadrotor_controller_module(model, criterion, optimizer, trainloader, 
         position_loss, velocity_loss, rotational_loss, omega_loss = criterion(states.transpose(0,1), setpoints, Rds.transpose(0,1), desWs.squeeze(-1).transpose(0,1))
         loss = position_loss + velocity_loss + rotational_loss + omega_loss
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), clip_gradient_norm)
+        for parameter in model.parameters():
+            if parameter.grad is not None:
+                with torch.no_grad():
+                    parameter.grad = torch.clamp(parameter.grad, -clip_gradient_norm*torch.abs(parameter), clip_gradient_norm*torch.abs(parameter))
         optimizer.step()
 
         with torch.no_grad():
@@ -221,10 +229,14 @@ if __name__=="__main__":
                         help='if toggled, this experiment will be tracked with Weights and Biases')
     parser.add_argument('--optimizer', type=str, default='SGD',
                         help='the optimizer used tune the gains')
+    parser.add_argument('--gain-init', type=str, default='ones',
+                        help='the initial gains used for tuning')
     parser.add_argument('--loss-fn', type=str, default='MSE',
                         help='the loss function used for the optimization')
     parser.add_argument('--sim-noise', type=lambda x: bool(strtobool(x)), default=False,
                         help='if toggled, the simulation will be run with noise')
+    parser.add_argument('--random-init', type=lambda x: bool(strtobool(x)), default=False,
+                        help='if toggled, the simulation will sample random gains in the beginning')
     parser.add_argument('--double-window-size-on-plateau', type=lambda x: bool(strtobool(x)), default=True,
                         help='if toggled, the window size will double if the training loss does not decrease any more')
     parser.add_argument('--num-epochs-plateau', type=int, default=50,
@@ -241,6 +253,8 @@ if __name__=="__main__":
                         help='weight for the rotational loss')
     parser.add_argument('--omega-weight', type=float, default=1.,
                         help='weight for the omega loss')
+    parser.add_argument('--clip-gradient-norm', type=float, default=1.0,
+                        help='gradient norm to clip the gradient at')
     args = parser.parse_args()
     
     # write custom transform to create setpoint
@@ -248,14 +262,26 @@ if __name__=="__main__":
     figure8_dataset.slice_into_windows(window_size=args.window_size)
 
     train_dataloader = DataLoader(figure8_dataset, batch_size=args.batch_size, shuffle=True)
-    # quadrotor_controller_module = QuadrotorControllerModule(dt=dt, kp=[[9.],[9.],[9.]], kv=[[7.],[7.],[7.]], kw=[[0.0013],[0.0013],[0.0013]], kr=[[0.0055],[0.0055],[0.0055]])
-    quadrotor_controller_module = QuadrotorControllerModule(dt=args.dt, kp=[[1.],[1.],[1.]], kv=[[1.],[1.],[1.]], kw=[[1.],[1.],[1.]], kr=[[1.],[1.],[1.]], noise_on=args.sim_noise)
-    # quadrotor_controller_module = QuadrotorControllerModule(dt=args.dt, kp=[[0.8557730652819432], [1.0935266831827213], [1.1378830690574784]], kv=[[1.0499406668079418], [1.1435798304026576], [1.0953624603085077]], kw=[[0.003153056642205069], [0.001154707110528682], [0.005679290258691776]], kr=[[0.01928796833157137], [0.017564737652027082], [0.08202443114730949]], noise_on=args.sim_noise)
+    if args.gain_init == 'random':
+        kp = np.random.uniform(1., 10.)
+        kv = np.random.uniform(1., 10.)
+        kr = np.random.uniform(1e-8, 1.)
+        kw = np.random.uniform(1e-8, 1.)
+        quadrotor_controller_module = QuadrotorControllerModule(dt=args.dt, kp=[[kp],[kp],[kp]], kv=[[kv],[kv],[kv]], kw=[[kw],[kw],[kw]], kr=[[kr],[kr],[kr]], noise_on=args.sim_noise)
+    elif args.gain_init == 'pretuned':
+        quadrotor_controller_module = QuadrotorControllerModule(dt=args.dt, kp=[[9.],[9.],[9.]], kv=[[7.],[7.],[7.]], kw=[[0.0013],[0.0013],[0.0013]], kr=[[0.0055],[0.0055],[0.0055]], noise_on=args.sim_noise)
+    elif args.gain_init == 'ones':
+        quadrotor_controller_module = QuadrotorControllerModule(dt=args.dt, kp=[[1.],[1.],[1.]], kv=[[1.],[1.],[1.]], kw=[[1.],[1.],[1.]], kr=[[1.],[1.],[1.]], noise_on=args.sim_noise)
+    else:
+        ValueError(f'Gain initialization {args.gain_init} is not supported')
+
     criterion = QuadrotorControllerLoss(loss_fn=args.loss_fn)
     if args.optimizer == 'SGD':
         optimizer = optim.SGD
     elif args.optimizer == 'Adam':
         optimizer = optim.Adam
+    elif args.optimizer == 'LBFGS':
+        optimizer = optim.LBFGS
     else:
         raise ValueError(f'Optimizer {args.optimizer} is not a valid option')
 
@@ -288,7 +314,7 @@ if __name__=="__main__":
         start_epoch = 0
 
     for epoch in range(start_epoch, args.epochs):
-        position_loss, velocity_loss, rotational_loss, omega_loss = train_quadrotor_controller_module(model=quadrotor_controller_module, criterion=criterion, optimizer=optimizer, trainloader=train_dataloader, writer=writer)
+        position_loss, velocity_loss, rotational_loss, omega_loss = train_quadrotor_controller_module(model=quadrotor_controller_module, criterion=criterion, optimizer=optimizer, trainloader=train_dataloader, writer=writer, clip_gradient_norm=args.clip_gradient_norm)
         loss = args.position_weight * position_loss + args.velocity_weight * velocity_loss + args.rotational_weight * rotational_loss + args.omega_weight * omega_loss
 
         if writer is not None:
@@ -305,7 +331,7 @@ if __name__=="__main__":
             # writer.add_scalar("physical_parameters/inertia", quadrotor_controller_module.inertia, global_step=epoch)
 
         if args.double_window_size_on_plateau:
-            if loss < best_loss:
+            if loss < best_loss - 1e-4:
                 best_loss = loss
                 iterations_since_decrease = 0
             else:
@@ -313,8 +339,8 @@ if __name__=="__main__":
             
             if iterations_since_decrease > args.num_epochs_plateau:
                 args.window_size *= 2
-                if args.window_size > 800:
-                    args.window_size = 800
+                if args.window_size > 350:
+                    args.window_size = 350
                 figure8_dataset.slice_into_windows(window_size=args.window_size)
                 iterations_since_decrease = 0
                 best_loss = torch.inf
