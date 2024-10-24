@@ -4,5 +4,9 @@ __pycache__
 .vscode/
 
 # generated data
-*.csv
-*.pt
+*.npy
+/checkpoints
+/results
+
+# log data
+/runs

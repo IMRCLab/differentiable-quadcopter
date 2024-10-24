@@ -1,6 +1,9 @@
 import numpy as np
 import rowan
-from quadrotor_np import Quadrotor
+import roma
+import torch
+from torch import nn
+from quadrotor_pytorch import QuadrotorAutograd
 
 # http://people.csail.mit.edu/jstraub/download/straubTransformationCookbook.pdf
 def vee(R):
@@ -9,6 +12,76 @@ def vee(R):
 	# exit()
 	# return np.array([-R[1,2], R[0,2], -R[0,1]])
 	return np.array([R[2,1], R[0,2], R[1,0]])
+
+def hat_so3(v):
+	return torch.tensor([[0., -v[2], v[1]],
+					     [v[2], 0., -v[0]],
+						 [-v[1], v[0], 0.]])
+
+def vee_so3(R):
+	return 0.5 * torch.tensor([[R[2,1]-R[1,2]],
+							   [R[0,2]-R[2,0]],
+							   [R[1,0]-R[0,1]]])
+
+class vec3_s:
+    def __init__(self, x=None, y=None, z=None):
+        self.x = x
+        self.y = y
+        self.z = z
+
+class attitude_t:
+    def __init__(self, roll=None, pitch=None, yaw=None):
+        self.roll  = roll
+        self.pitch = pitch
+        self.yaw   = yaw
+
+class quaternion_t:
+    def __init__(self, q0=None, q1=None, q2=None, q3=None, x=None, y=None, z=None, w=None):
+        self.q0 = q0
+        self.q1 = q1
+        self.q2 = q2
+        self.q3 = q3
+        self.x  = x 
+        self.y  = y 
+        self.z  = z 
+        self.w  = w 
+
+class state_t:
+	def __init__(self, position=vec3_s(), velocity=vec3_s(), attitude=attitude_t(), attitudeQuaternion=quaternion_t(), attitudeRate=attitude_t(), acc=vec3_s(), payload_pos=vec3_s(), payload_vel=vec3_s()):
+		self.position = position
+		self.velocity = velocity
+		self.attitude = attitude
+		self.attitudeQuaternion = attitudeQuaternion
+		self.attitudeRate = attitudeRate
+		self.acc = acc
+		self.payload_pos = payload_pos
+		self.payload_vel = payload_vel
+
+class mode:
+	def __init__(self):
+		self.x     = None
+		self.y     = None
+		self.z     = None
+		self.roll  = None
+		self.pitch = None
+		self.roll  = None
+		self.yaw   = None
+		self.quat  = None
+
+class setpoint_t:
+	def __init__(self, position=vec3_s(), velocity=vec3_s(),
+			  attitude=attitude_t(), attitudeQuaternion=quaternion_t(),
+			  attitudeRate=attitude_t(), acceleration=vec3_s(), jerk=vec3_s(),
+			  snap=vec3_s(), mode=mode()):
+		self.position = position
+		self.attitude = attitude
+		self.attitudeQuaternion = attitudeQuaternion
+		self.velocity = velocity
+		self.attitudeRate = attitudeRate
+		self.acceleration = acceleration
+		self.jerk = jerk
+		self.snap = snap
+		self.mode = mode
 
 # Minimum Snap Trajectory Generation and Control for Quadrotors
 # Daniel Mellinger and Vijay Kumar
@@ -76,6 +149,10 @@ class ControllerLee:
 		self.mass = 0
 
 	def update(self, pos, vel, quat, omega, pos_des, vel_des, acc_des, omega_des, yaw_des):
+		"""
+		Takes the current state and the desired state as inputs and returns the controls.
+		f is the total thrust and M are the control moments	
+		"""
 		
 		e_x = pos - pos_des # (6)
 		e_v = vel - vel_des # (7)
@@ -106,10 +183,197 @@ class ControllerLee:
 
 		return np.array([f, M[0], M[1], M[2]]), q_d
 
+class ControllerLeeKhaled(nn.Module):
+	def __init__(self, uavModel, kp=1., kv=1., kw=1., kr=1.):
+		"""
+		Parameters:
+		-----------
+		uavModel:
+			model of the UAV to be controlled
+		kp, kv, kw, kr: float
+			gains of the controller
+		"""
+		super().__init__()
+		self.uavModel = uavModel # the model the controller controls
+		self.m = torch.tensor(uavModel.m, dtype=torch.double)
+		self.I = torch.tensor(uavModel.I, dtype=torch.double)
+	
+		# make the gains tunable parameters
+		self.kp = nn.Parameter(torch.tensor(kp))
+		self.kv = nn.Parameter(torch.tensor(kv))
+		self.kw = nn.Parameter(torch.tensor(kw))
+		self.kr = nn.Parameter(torch.tensor(kr))
+
+		self.double()
+	
+	def updateUAVModel(self, uavModel):
+		self.m = torch.tensor(uavModel.m, dtype=torch.double)
+		self.I = torch.tensor(uavModel.I, dtype=torch.double)
+	
+	def thrustCtrl(self, R, refAcc, ep, ev):
+		"""
+		Computes the total thrust f.
+
+		Parameters:
+		-----------
+			R: torch.Tensor
+				rotational matrix describing the attitude of the quadrotor
+			refAcc: torch.Tensor
+				sum of desired acceleration and gravity
+			ep: torch.Tensor
+				tracking error in position
+			ev: torch.Tensor
+				tracking error in velocity	
+		
+		Returns:
+		--------
+			thrustSI: torch.Tensor
+				total thrust f
+			FdI: torch.Tensor
+				I don't know
+		"""
+		e3 = torch.tensor([0,0,1], dtype=torch.double).reshape((3,1))
+		kpep = self.kp * ep
+		kvev = self.kv * ev
+		FdI = refAcc - kpep - kvev
+		return (self.m * FdI.T @ R @ e3), FdI
+	
+	@staticmethod
+	def computeDesiredRot(Fd, yaw):
+		"""
+		Computes the desired attitude.
+
+		Parameters:
+		-----------
+			Fd: torch.Tensor
+				desired force in b_3 direction
+			yaw: torch.Tensor
+				desired yaw of the quadrotor. relevant for b_1 vector
+		"""
+		Rd = torch.eye(3, dtype=torch.double)
+		normFd = torch.linalg.norm(Fd)
+		if normFd > 0:
+			zdes = (Fd / normFd)
+		else:
+			zdes = torch.tensor([[0],[0],[1]], dtype=torch.double)
+		xcdes = torch.tensor([torch.cos(yaw).item(), torch.sin(yaw).item(), 0], dtype=torch.double).reshape((3,1)) # 1,0,0 for yaw=0
+		normZX = torch.linalg.norm(hat_so3(zdes) @ xcdes)
+		if normZX > 0:
+			ydes = torch.cross(zdes, xcdes) / normZX
+		else:
+			ydes = torch.tensor([0, 1, 0], dtype=torch.double).reshape((3,1))
+		xdes = torch.cross(ydes, zdes)
+		Rd[:,:1] = xdes
+		Rd[:,1:2] = ydes
+		Rd[:,2:3] = zdes
+		return Rd
+
+	def computeWd(self, R, T, desJerk):
+		"""
+		Computes the desired angular velocity omega.
+
+		See Mellinger ad Kumar, 2011, equation (7) and following.
+
+		Parameters:
+		-----------
+			R: torch.Tensor
+				attitude of the quadrotor
+			T: torch.Tensor
+				total thrust for the quadrotor
+			desJerk: torch.Tensor
+				desired jerk of the quadrotor
+		"""
+		xb = R[:,0:1]
+		yb = R[:,1:2]
+		zb = R[:,2:3]
+		if T == 0:
+			hw = torch.zeros((3,1), dtype=torch.double)
+		else:
+			hw = self.m / T * (desJerk - zb.T @ desJerk * zb)
+		p = -hw.T @ yb
+		q = hw.T @ xb
+		r = 0
+		return torch.tensor([p, q, r], dtype=torch.double).reshape((3,1))
+
+
+	def torqueCtrl(self, R, curr_w, er, ew, Rd, des_w): # , des_wd):
+		krer = self.kr * er
+		kwew = self.kw * ew
+		return (-krer - kwew + (torch.cross(curr_w, (self.I @ curr_w)))) \
+			- self.I @ (hat_so3(curr_w) @ R.T @ Rd @ des_w) # - R.T @ Rd @ des_wd)
+
+	# the forward pass of the controller should be the main function
+	# it takes a state and a desired state as input and returns the controls i.e. thrust and moments
+	# the 'free' parameters of the controller are the gains allowing for optimization during training
+	def forward(self, current_state: torch.Tensor, setpoint: torch.Tensor):
+		"""
+		Computes the desired controls for a current state given some target state. The controller uses terms up to the jerk but no snap.
+
+		Parameters:
+		-----------
+			current_state: torch.Tensor
+				Current state of the UAV. Contains position, attitude (unit quaternion), velocity and rotational velocity.
+				[x, y, z, v_x, v_y, v_z, q_w, q_x, q_y, q_z, omega_roll, omega_pitch, omega_yaw]
+			setpoint: torch.Tensor
+				Setpoint ('desired state') of the trajectory. Contains position, velocity, acceleration, jerk and yaw
+				[x, y, z, v_x, v_y, v_z, a_x, a_y, a_z, j_x, j_y, j_z, yaw]
+		"""
+		# current state of the quadrotor
+		# currPos = torch.tensor([current_state.position.x, current_state.position.y, current_state.position.z]).reshape((3,1))
+		currPos = current_state[:3].reshape((3,1))
+		# currVel = torch.tensor([current_state.velocity.x, current_state.velocity.y, current_state.velocity.z]).reshape((3,1))
+		currVel = current_state[3:6].reshape((3,1))
+		R = roma.unitquat_to_rotmat(torch.tensor([current_state[7], current_state[8], current_state[9], current_state[6]]))
+		# R = torch.tensor(rowan.to_matrix(current_state.attitudeQuaternion), dtype=torch.float)
+		# currW = torch.tensor([current_state.attitudeRate.roll, current_state.attitudeRate.pitch, current_state.attitudeRate.yaw]).reshape((3,1))
+		currW = current_state[10:13].reshape((3,1))
+
+		# desired state of the quadrotor
+		# desPos = torch.tensor([desired_state.position.x, desired_state.position.y, desired_state.position.z]).reshape((3,1))
+		desPos = setpoint[:3].reshape((3,1))
+		# desVel = torch.tensor([desired_state.velocity.x, desired_state.velocity.y, desired_state.velocity.z]).reshape((3,1))    
+		desVel = setpoint[3:6].reshape((3,1))
+		# desAcc = torch.tensor([desired_state.acceleration.x, desired_state.acceleration.y, desired_state.acceleration.z]).reshape((3,1))
+		desAcc = setpoint[6:9].reshape((3,1))
+		# desJerk = torch.tensor([desired_state.jerk.x, desired_state.jerk.y, desired_state.jerk.z]).reshape((3,1))
+		desJerk = setpoint[9:12].reshape((3,1))
+		desYaw = setpoint[12]
+		# desSnap = torch.tensor([desired_state.snap.x, desired_state.snap.y, desired_state.snap.z]).reshape((3,1))
+		ep = (currPos - desPos) # tracking error in position
+		ev = (currVel  - desVel) # tracking error in velocity
+
+		gravComp = torch.tensor([0.,0.,9.81], dtype=torch.double).reshape((3,1))
+		thrustSI, FdI = self.thrustCtrl(R, desAcc+gravComp, ep, ev)
+
+		Rd = self.computeDesiredRot(FdI, desYaw)
+
+		er = 0.5 * vee_so3(Rd.T @ R - R.T @ Rd)
+
+		# zb = Rd[:,2]
+		T = thrustSI
+		# Td = self.m * desJerk.T @ zb
+		desW = self.computeWd(Rd, T, desJerk)
+		# Td_dot = m * desSnap.T @ zb - # this line contains error in the original code
+		# des_wd = self.computeWddot(R, des_w, T, Td, Td_dow, dessnap)
+		ew = currW - R.T @ Rd @ desW
+		torque = self.torqueCtrl(R, currW, er, ew, Rd, desW) #, des_wd)
+
+		return thrustSI, torque, Rd, desW #, desWd # with the controls (thrustSI, torque), the current state and a proper model of the drone a next state can be computed
+	
+	def computeControl(self):
+		return self.forward(self.uavModel.current_state, self.uavModel.desired_state)
+
+
+
+
+
+
+
+
 
 if __name__ == '__main__':
 
-	robot = Quadrotor()
+	robot = QuadrotorAutograd()
 	robot.dt = 0.001
 	# controller = ControllerMellinger()
 	controller = ControllerLee()

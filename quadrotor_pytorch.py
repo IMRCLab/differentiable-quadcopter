@@ -66,7 +66,7 @@ def qnormalize(q):
 
 class QuadrotorAutograd():
 
-	def __init__(self):
+	def __init__(self, noise_on=False):
 		self.min_u = 0
 		self.max_u = 12 / 1000 * 9.81
 
@@ -78,14 +78,14 @@ class QuadrotorAutograd():
 		self.max_x = -self.min_x
 
 		# parameters (Crazyflie 2.0 quadrotor)
-		self.mass = 0.034 # true mass in kg
-		# self.J = np.array([
+		self.m = torch.tensor(0.034, dtype=torch.double) # true mass in kg
+		# self.I = np.array([
 		# 	[16.56,0.83,0.71],
 		# 	[0.83,16.66,1.8],
 		# 	[0.72,1.8,29.26]
 		# 	]) * 1e-6  # kg m^2
-		self.J = torch.tensor([16.571710e-6, 16.655602e-6, 29.261652e-6], dtype=torch.float64)
-		# self.J = torch.tensor([1.05, 1.0, .95], dtype=torch.float64)
+		self.I = torch.tensor([16.571710e-6, 16.655602e-6, 29.261652e-6], dtype=torch.double)
+		# self.I = torch.tensor([1.05, 1.0, .95], dtype=torch.float64)
 
 		# Note: we assume here that our control is forces
 		arm_length = 0.046 # m
@@ -99,12 +99,13 @@ class QuadrotorAutograd():
 			], dtype=torch.float64)
 		self.g = 9.81 # not signed
 
-		# if self.J.shape == (3,3):
-		# 	self.inv_J = torch.linalg.pinv(self.J) # full matrix -> pseudo inverse
+		# if self.I.shape == (3,3):
+		# 	self.inv_I = torch.linalg.pinv(self.I) # full matrix -> pseudo inverse
 		# else:
-		# 	self.inv_J = 1 / self.J # diagonal matrix -> division
+		# 	self.inv_I = 1 / self.I # diagonal matrix -> division
 
 		self.dt = 0.01
+		self.noise_on = noise_on
 
 
 	def step(self, state, force):
@@ -113,6 +114,7 @@ class QuadrotorAutograd():
 		omega = state[...,10:]
 
 		# eta = torch.mv(self.B0, force)
+		# TODO: this line might be wrong - instead: eta = self.B0 @ force
 		eta = force @ self.B0.T
 		# f_u = torch.tensor([0,0,eta[0]])
 		batch_size = state.shape[0]
@@ -123,8 +125,11 @@ class QuadrotorAutograd():
 		# dynamics 
 		# dot{p} = v 
 		pos_next = state[...,:3] + state[...,3:6] * self.dt
+		if self.noise_on:
+			with torch.no_grad():
+				pos_next += state[...,3:6] * torch.randn_like(state[..., 3:6]) * self.dt
 		# mv = mg + R f_u 
-		vel_next = state[...,3:6] + (torch.tensor([0,0,-self.g]) + qrotate(q,f_u) / self.mass) * self.dt
+		vel_next = state[...,3:6] + (torch.tensor([0,0,-self.g]) + qrotate(q,f_u) / self.m) * self.dt
 
 		# dot{R} = R S(w)
 		# to integrate the dynamics, see
@@ -134,10 +139,10 @@ class QuadrotorAutograd():
 		# omega_global = omega
 		q_next = qnormalize(qintegrate(q, omega_global, self.dt))
 
-		# mJ = Jw x w + tau_u
-		inv_J = 1 / self.J  # diagonal matrix -> division
-		omega_next = state[...,10:] + (inv_J * (torch.cross(self.J * omega,omega, dim=-1) + tau_u)) * self.dt
-		# omega_next = state[..., 10:] + inv_J * omega # * tau_u * self.dt # simplified dynamics
+		# mI = Iw x w + tau_u
+		inv_I = 1 / self.I  # diagonal matrix -> division
+		omega_next = state[...,10:] + (inv_I * (torch.cross(self.I * omega,omega, dim=-1) + tau_u)) * self.dt
+		# omega_next = state[..., 10:] + inv_I * omega # * tau_u * self.dt # simplified dynamics
 
 		return torch.cat((pos_next, vel_next, q_next, omega_next), dim=-1)
 
@@ -146,6 +151,7 @@ if __name__ == '__main__':
 
 	robot = QuadrotorAutograd()
 
+	# state: x = [x,y,z, v_x, v_y, v_x, q_w, q_x, q_y, q_z, omega_roll, omega_pitch, omega_yaw]
 	xbar = torch.tensor([[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]], requires_grad=True, dtype=torch.float64)
 	ubar = torch.tensor([[0, 0, 0, 0]], requires_grad=True, dtype=torch.float64)
 
