@@ -12,9 +12,8 @@ from controller_pytorch import ControllerLee
 from quadrotor_pytorch import QuadrotorAutograd
 from trajectories import spline_segment, f, fdot, fdotdot, fdotdotdot
 from torch import optim
-from train_system_id import qsym_distance
 from tqdm import tqdm
-from controller_pytorch import vee_so3
+from utils import vee_so3
 
 from torch.utils.data import Dataset, DataLoader
 
@@ -99,26 +98,31 @@ class QuadrotorControllerModule(nn.Module):
         return torch.stack(y, dim=0), torch.stack(Rds, dim=0), torch.stack(desWs, dim=0) # time first in -> time first out
 
 class QuadrotorControllerLoss(nn.Module):
-    def __init__(self, loss_fn='L1'):
+    def __init__(self, loss_fn='L1', positional_weight=1.0, velocity_weight=1.0, rotational_weight=1.0, omega_weight=1.0):
         super().__init__()
         if loss_fn == 'L1':
             self.loss_fn = nn.L1Loss()
         elif loss_fn == 'MSE':
             self.loss_fn = nn.MSELoss()
+        self.positional_weight = positional_weight
+        self.velocity_weight = velocity_weight
+        self.rotational_weight = rotational_weight
+        self.omega_weight = omega_weight
 
     def forward(self, states, setpoints, desR, desW):
-        position_loss = self.loss_fn(states[...,0:3], setpoints[...,0:3])
-        velocity_loss = self.loss_fn(states[...,3:6], setpoints[...,3:6])
+        position_loss = self.positional_weight * self.loss_fn(states[...,0:3], setpoints[...,0:3])
+        velocity_loss = self.velocity_weight * self.loss_fn(states[...,3:6], setpoints[...,3:6])
         # rotational_loss = torch.mean(qsym_distance(roma.rotmat_to_unitquat(desR), states[...,6:10]))
         R = roma.unitquat_to_rotmat(states[..., 6:10])
         er = 0.5 * vee_so3(desR.transpose(-2,-1) @ R - R.transpose(-2,-1) @ desR) # tracking error in rotation
-        rotational_loss = torch.mean(er**2)
-        omega_loss = self.loss_fn(desW, states[...,10:13])
+        rotational_loss = self.rotational_weight * torch.mean(er**2)
+        omega_loss = self.omega_weight * self.loss_fn(desW, states[...,10:13])
         return (position_loss, velocity_loss, rotational_loss, omega_loss)
         
 
 class NthOrderTrajectoryDataset(Dataset):
     def __init__(self, parameter_file, funcs, dt, transform, t_max=None, t_0=0, window_size=None, as_setpoints=True):
+        super().__init__()
         parameters = pd.read_csv(parameter_file)
         duration = np.sum(parameters['duration'])
         if t_max is None:
@@ -179,10 +183,25 @@ def train_quadrotor_controller_module(model, criterion, optimizer, trainloader, 
         position_loss, velocity_loss, rotational_loss, omega_loss = criterion(states.transpose(0,1), setpoints, Rds.transpose(0,1), desWs.squeeze(-1).transpose(0,1))
         loss = position_loss + velocity_loss + rotational_loss + omega_loss
         loss.backward()
+        # for parameter in model.parameters():
+        #     if parameter.grad is not None:
+        #         with torch.no_grad():
+        #             parameter.grad = torch.clamp(parameter.grad, -clip_gradient_norm*torch.abs(parameter), clip_gradient_norm*torch.abs(parameter))
         for parameter in model.parameters():
             if parameter.grad is not None:
                 with torch.no_grad():
-                    parameter.grad = torch.clamp(parameter.grad, -clip_gradient_norm*torch.abs(parameter), clip_gradient_norm*torch.abs(parameter))
+                    # new fancy gradient projection method
+                    relative_grad = parameter.grad / parameter
+                    r_max = 0.0
+                    for r in relative_grad:
+                        if torch.abs(r) > clip_gradient_norm:
+                            if torch.abs(r) > r_max:
+                                r_max = torch.abs(r)
+                    if r_max > 0.0:
+                        relative_grad = relative_grad / r_max * clip_gradient_norm
+                        parameter.grad = relative_grad * parameter
+                    # parameter.grad = torch.clamp(parameter.grad, -clip_gradient_norm*torch.abs(parameter), clip_gradient_norm*torch.abs(parameter))
+                    # print(parameter.grad)
         optimizer.step()
 
         with torch.no_grad():
@@ -255,6 +274,8 @@ if __name__=="__main__":
                         help='weight for the omega loss')
     parser.add_argument('--clip-gradient-norm', type=float, default=1.0,
                         help='gradient norm to clip the gradient at')
+    parser.add_argument('--max-window-size', type=int, default=400,
+                        help='maximum window size to extend the trajectories to')
     args = parser.parse_args()
     
     # write custom transform to create setpoint
@@ -275,17 +296,17 @@ if __name__=="__main__":
     else:
         ValueError(f'Gain initialization {args.gain_init} is not supported')
 
-    criterion = QuadrotorControllerLoss(loss_fn=args.loss_fn)
+    criterion = QuadrotorControllerLoss(loss_fn=args.loss_fn, positional_weight=args.position_weight, velocity_weight=args.velocity_weight, rotational_weight=args.rotational_weight, omega_weight=args.omega_weight)
     if args.optimizer == 'SGD':
-        optimizer = optim.SGD
+        optimizer_class = optim.SGD
     elif args.optimizer == 'Adam':
-        optimizer = optim.Adam
+        optimizer_class = optim.Adam
     elif args.optimizer == 'LBFGS':
-        optimizer = optim.LBFGS
+        optimizer_class = optim.LBFGS
     else:
         raise ValueError(f'Optimizer {args.optimizer} is not a valid option')
 
-    optimizer = optimizer(quadrotor_controller_module.parameters(), lr=args.lr)
+    optimizer = optimizer_class(quadrotor_controller_module.parameters(), lr=args.lr)
 
     if args.save_checkpoint_file:
         run_name = args.save_checkpoint_file
@@ -315,7 +336,7 @@ if __name__=="__main__":
 
     for epoch in range(start_epoch, args.epochs):
         position_loss, velocity_loss, rotational_loss, omega_loss = train_quadrotor_controller_module(model=quadrotor_controller_module, criterion=criterion, optimizer=optimizer, trainloader=train_dataloader, writer=writer, clip_gradient_norm=args.clip_gradient_norm)
-        loss = args.position_weight * position_loss + args.velocity_weight * velocity_loss + args.rotational_weight * rotational_loss + args.omega_weight * omega_loss
+        loss = position_loss + velocity_loss + rotational_loss + omega_loss
 
         if writer is not None:
             writer.add_scalar("loss/position_loss", position_loss, global_step=epoch)
@@ -339,11 +360,12 @@ if __name__=="__main__":
             
             if iterations_since_decrease > args.num_epochs_plateau:
                 args.window_size *= 2
-                if args.window_size > 350:
-                    args.window_size = 350
+                if args.window_size > args.max_window_size:
+                    args.window_size = args.max_window_size
                 figure8_dataset.slice_into_windows(window_size=args.window_size)
                 iterations_since_decrease = 0
                 best_loss = torch.inf
+                # optimizer = optimizer_class(quadrotor_controller_module.parameters(), lr=args.lr)
 
         if args.save_checkpoint_file is not None: 
             # save gains/model

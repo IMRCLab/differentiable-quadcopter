@@ -78,6 +78,8 @@ if __name__=="__main__":
     
     # 3. run model and baseline for trajectories
     for environment_file in environment_files:
+        if environment_file != 'figure8.csv':
+            continue
         environment_name = environment_file.split('.')[0]
         # a. create dataset
         dataset = NthOrderTrajectoryDataset(parameter_file=environment_file, funcs=[f, fdot, fdotdot, fdotdotdot], dt=dt, transform=torch.tensor)
@@ -88,77 +90,85 @@ if __name__=="__main__":
         baseline_states, baseline_Rds, baseline_desWs = run_trajectory(baseline, setpoint_trajectory)
 
         # computing errors and statistics for baseline
-        position_errors_baseline, velocity_errors_baseline, rotational_errors_baseline, omega_errors_baseline = compute_errors(setpoint_trajectory, baseline_states, baseline_Rds, baseline_desWs, error_fn='MSE')
-        position_mean_baseline = torch.mean(position_errors_baseline).item()
-        position_std_baseline = torch.std(position_errors_baseline).item()
-        velocity_mean_baseline = torch.mean(velocity_errors_baseline).item()
-        velocity_std_baseline = torch.std(velocity_errors_baseline).item()
-        rotational_mean_baseline = torch.mean(rotational_errors_baseline).item()
-        rotational_std_baseline = torch.std(rotational_errors_baseline).item()
-        omega_mean_baseline = torch.mean(omega_errors_baseline).item()
-        omega_std_baseline = torch.std(omega_errors_baseline).item()
+        # position_errors_baseline, velocity_errors_baseline, rotational_errors_baseline, omega_errors_baseline = compute_errors(setpoint_trajectory, baseline_states, baseline_Rds, baseline_desWs, error_fn='MSE')
+        # position_mean_baseline = torch.mean(position_errors_baseline).item()
+        # position_std_baseline = torch.std(position_errors_baseline).item()
+        # velocity_mean_baseline = torch.mean(velocity_errors_baseline).item()
+        # velocity_std_baseline = torch.std(velocity_errors_baseline).item()
+        # rotational_mean_baseline = torch.mean(rotational_errors_baseline).item()
+        # rotational_std_baseline = torch.std(rotational_errors_baseline).item()
+        # omega_mean_baseline = torch.mean(omega_errors_baseline).item()
+        # omega_std_baseline = torch.std(omega_errors_baseline).item()
 
 
-        # computing errors and statistics for model
-        position_errors_model, velocity_errors_model, rotational_errors_model, omega_errors_model = compute_errors(setpoint_trajectory, model_states, model_Rds, model_desWs)
-        position_mean_model = torch.mean(position_errors_model).item()
-        position_std_model = torch.std(position_errors_model).item()
-        velocity_mean_model = torch.mean(velocity_errors_model).item()
-        velocity_std_model = torch.std(velocity_errors_model).item()
-        rotational_mean_model = torch.mean(rotational_errors_model).item()
-        rotational_std_model = torch.std(rotational_errors_model).item()
-        omega_mean_model = torch.mean(omega_errors_model).item()
-        omega_std_model = torch.std(omega_errors_model).item()
+        # # computing errors and statistics for model
+        # position_errors_model, velocity_errors_model, rotational_errors_model, omega_errors_model = compute_errors(setpoint_trajectory, model_states, model_Rds, model_desWs)
+        # position_mean_model = torch.mean(position_errors_model).item()
+        # position_std_model = torch.std(position_errors_model).item()
+        # velocity_mean_model = torch.mean(velocity_errors_model).item()
+        # velocity_std_model = torch.std(velocity_errors_model).item()
+        # rotational_mean_model = torch.mean(rotational_errors_model).item()
+        # rotational_std_model = torch.std(rotational_errors_model).item()
+        # omega_mean_model = torch.mean(omega_errors_model).item()
+        # omega_std_model = torch.std(omega_errors_model).item()
 
-        # write error statistics to file
-        error_dict = {
-            f'{environment_name}': {
-                'baseline': {
-                    'position_error': {
-                        'mean': position_mean_baseline,
-                        'std': position_std_baseline,
-                    },
-                    'velocity_error': {
-                        'mean': velocity_mean_baseline,
-                        'std': velocity_std_baseline,
-                    },
-                    'rotational_error': {
-                        'mean': rotational_mean_baseline,
-                        'std': rotational_std_baseline,
-                    },
-                    'omega_error': {
-                        'mean': omega_mean_baseline,
-                        'std': omega_std_baseline,
-                    },
-                },
-                'optimized': {
-                    'position_error': {
-                        'mean': position_mean_model,
-                        'std': position_std_model,
-                    },
-                    'velocity_error': {
-                        'mean': velocity_mean_model,
-                        'std': velocity_std_model,
-                    },
-                    'rotational_error': {
-                        'mean': rotational_mean_model,
-                        'std': rotational_std_model,
-                    },
-                    'omega_error': {
-                        'mean': omega_mean_model,
-                        'std': omega_std_model,
-                    },
-                },
-            }
-        }
+        # # write error statistics to file
+        # error_dict = {
+        #     f'{environment_name}': {
+        #         'baseline': {
+        #             'position_error': {
+        #                 'mean': position_mean_baseline,
+        #                 'std': position_std_baseline,
+        #             },
+        #             'velocity_error': {
+        #                 'mean': velocity_mean_baseline,
+        #                 'std': velocity_std_baseline,
+        #             },
+        #             'rotational_error': {
+        #                 'mean': rotational_mean_baseline,
+        #                 'std': rotational_std_baseline,
+        #             },
+        #             'omega_error': {
+        #                 'mean': omega_mean_baseline,
+        #                 'std': omega_std_baseline,
+        #             },
+        #         },
+        #         'optimized': {
+        #             'position_error': {
+        #                 'mean': position_mean_model,
+        #                 'std': position_std_model,
+        #             },
+        #             'velocity_error': {
+        #                 'mean': velocity_mean_model,
+        #                 'std': velocity_std_model,
+        #             },
+        #             'rotational_error': {
+        #                 'mean': rotational_mean_model,
+        #                 'std': rotational_std_model,
+        #             },
+        #             'omega_error': {
+        #                 'mean': omega_mean_model,
+        #                 'std': omega_std_model,
+        #             },
+        #         },
+        #     }
+        # }
 
-        with open(f'{result_dir}/results_{args.model_name}.yaml', 'a') as file:
-            yaml.safe_dump(error_dict, file)
+        # with open(f'{result_dir}/results_{args.model_name}.yaml', 'a') as file:
+        #     yaml.safe_dump(error_dict, file)
 
         # generate plots
         ax = plt.figure().add_subplot(projection='3d')
-        ax.plot(baseline_states[:,0], baseline_states[:,1], baseline_states[:,2], label='baseline trajectory')
-        ax.plot(model_states[:,0], model_states[:,1], model_states[:,2], label='model trajectory')
+        # if environment_name == 'circle_0':
+        #     ax.set_ylim(-0.5, 0.5)
+        # elif True:
+        #     continue
+        # elif environment_name == 'figure8':
+        #     ax.set_zlim(-0.5, 0.5)
+
+        # ax.plot(baseline_states[:,0], baseline_states[:,1], baseline_states[:,2], label='baseline trajectory')
+        sim_abort = 280
+        ax.plot(model_states[:sim_abort,0], model_states[:sim_abort,1], model_states[:sim_abort,2], label='model trajectory')
         ax.plot(setpoint_trajectory[:,0],setpoint_trajectory[:,1], setpoint_trajectory[:,2], linestyle='dotted', label='reference trajectory')
         ax.legend()
         ax.set_xlabel('X')
@@ -166,4 +176,4 @@ if __name__=="__main__":
         ax.set_zlabel('Z')
         ax.view_init(elev=20, azim=-35, roll=0)
         plt.tight_layout()
-        plt.savefig(f'{result_dir}/figures/trajectory_{environment_name}_{args.model_name}.png')
+        plt.savefig(f'{result_dir}/figures/trajectory_{environment_name}_{args.model_name}.png', dpi=300)

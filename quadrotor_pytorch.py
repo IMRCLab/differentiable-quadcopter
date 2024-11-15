@@ -108,7 +108,7 @@ class QuadrotorAutograd():
 		self.noise_on = noise_on
 
 
-	def step(self, state, force):
+	def step(self, state, force, dt):
 		# compute next state
 		q = state[...,6:10]
 		omega = state[...,10:]
@@ -124,12 +124,12 @@ class QuadrotorAutograd():
 
 		# dynamics 
 		# dot{p} = v 
-		pos_next = state[...,:3] + state[...,3:6] * self.dt
+		pos_next = state[...,:3] + state[...,3:6] * dt
 		if self.noise_on:
 			with torch.no_grad():
-				pos_next += state[...,3:6] * torch.randn_like(state[..., 3:6]) * self.dt
+				pos_next += state[...,3:6] * torch.randn_like(state[..., 3:6]) * dt
 		# mv = mg + R f_u 
-		vel_next = state[...,3:6] + (torch.tensor([0,0,-self.g]) + qrotate(q,f_u) / self.m) * self.dt
+		vel_next = state[...,3:6] + (torch.tensor([0,0,-self.g]) + qrotate(q,f_u) / self.m) * dt
 
 		# dot{R} = R S(w)
 		# to integrate the dynamics, see
@@ -137,11 +137,11 @@ class QuadrotorAutograd():
 		# https://arxiv.org/pdf/1604.08139.pdf
 		omega_global = qrotate(q, omega)
 		# omega_global = omega
-		q_next = qnormalize(qintegrate(q, omega_global, self.dt))
+		q_next = qnormalize(qintegrate(q, omega_global, dt))
 
 		# mI = Iw x w + tau_u
 		inv_I = 1 / self.I  # diagonal matrix -> division
-		omega_next = state[...,10:] + (inv_I * (torch.cross(self.I * omega,omega, dim=-1) + tau_u)) * self.dt
+		omega_next = state[...,10:] + (inv_I * (torch.cross(self.I * omega,omega, dim=-1) + tau_u)) * dt
 		# omega_next = state[..., 10:] + inv_I * omega # * tau_u * self.dt # simplified dynamics
 
 		return torch.cat((pos_next, vel_next, q_next, omega_next), dim=-1)

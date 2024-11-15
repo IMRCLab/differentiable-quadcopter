@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 
 def hat_so3(v: torch.Tensor):
@@ -14,3 +15,14 @@ def vee_so3(R:torch.Tensor):
     return 0.5 * torch.stack([R[...,2,1]-R[...,1,2],
                               R[...,0,2]-R[...,2,0],
                               R[...,1,0]-R[...,0,1]], axis=-1)
+
+def slice_dataset(x, window_size, stride=None):
+    if stride is None:
+        stride = window_size - 1
+    slices = []
+    T, X = x.shape
+    N = np.floor((T-window_size)/stride).astype(int) + 1
+    slices = np.empty((N, window_size, X))
+    for i in range(N):
+        slices[i,:,:] = x[i*(window_size-1):(i+1)*window_size-i,:]
+    return slices
