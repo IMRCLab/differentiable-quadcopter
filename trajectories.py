@@ -1,6 +1,6 @@
 import numpy as np
-import matplotlib.pyplot as plt
 import pandas as pd
+import utils_visualize as vis
 
 
 def spline_segment(funcs, coeffs, ts):
@@ -75,21 +75,6 @@ def fdotdotdot(coeffs, t):
     yaw = 6 * coeffs['yaw^3'] + 24 * coeffs['yaw^4'] * t + 60 * coeffs['yaw^5'] * t**2 + 120 * coeffs['yaw^6'] * t**3 + 210 * coeffs['yaw^7'] * t**4
     return np.stack([x,y,z,yaw], axis=1)
 
-def plot_trajectory_data(trajectory, ts, title, labels):
-
-    rows = len(labels) 
-    fig, axs = plt.subplots(rows,1)
-    fig.suptitle(title)
-    fig.supxlabel('time [s]')
-    for i, label in enumerate(labels):
-        axs[i].plot(ts,trajectory[:,i])
-        axs[i].set_ylabel(label)
-        axs[i].grid()
-    
-    fig.tight_layout()
-    plt.show()
-
-
 if __name__=="__main__":
     data = pd.read_csv('figure8.csv')
     t_max = np.sum(data['duration'])
@@ -99,7 +84,7 @@ if __name__=="__main__":
 
     funcs = [f, fdot, fdotdot, fdotdotdot]
     spline_values = spline_segment(funcs, coeffs=data, ts=ts)
-    plot_trajectory_data(spline_values[:,0,:], ts, 'UAV position', labels=['x', 'y','z', 'yaw'])
-    plot_trajectory_data(spline_values[:,1,:], ts, 'UAV velocity', labels=['x', 'y','z', 'yaw'])
-    plot_trajectory_data(spline_values[:,2,:], ts, 'UAV acceleration', labels=['x', 'y','z', 'yaw'])
-    plot_trajectory_data(spline_values[:,3,:], ts, 'UAV jerk', labels=['x', 'y','z', 'yaw'])
+    vis.plot_trajectory_data(spline_values[:,0,:], ts, 'UAV position', labels=['x', 'y','z', 'yaw'])
+    vis.plot_trajectory_data(spline_values[:,1,:], ts, 'UAV velocity', labels=['x', 'y','z', 'yaw'])
+    vis.plot_trajectory_data(spline_values[:,2,:], ts, 'UAV acceleration', labels=['x', 'y','z', 'yaw'])
+    vis.plot_trajectory_data(spline_values[:,3,:], ts, 'UAV jerk', labels=['x', 'y','z', 'yaw'])
