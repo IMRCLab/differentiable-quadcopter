@@ -16,7 +16,19 @@ def vee_so3(R:torch.Tensor):
                               R[...,0,2]-R[...,2,0],
                               R[...,1,0]-R[...,0,1]], axis=-1)
 
+# quaternion norm (adopted from rowan)
+def qnorm(q):
+    return torch.linalg.norm(q, dim=-1, keepdim=True)
+
+# quaternion sym distance (adopted from rowan)
+def qsym_distance(p, q):
+    return torch.minimum(qnorm(p - q), qnorm(p + q))
+
 def slice_dataset(x, window_size, stride=None):
+    """
+    Slice the dataset into windows of size window_size with stride stride.
+    The last window will be truncated if there are not enough samples.
+    """
     if stride is None:
         stride = window_size - 1
     slices = []
