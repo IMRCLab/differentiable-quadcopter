@@ -21,10 +21,39 @@ import matplotlib.pyplot as plt
 
 
 class QuadrotorControllerModule(nn.Module):
-    def __init__(self, dt, kp=[[1.],[1.],[1.]], kv=[[1.],[1.],[1.]], kw=[[1.],[1.],[1.]], kr=[[1.],[1.],[1.]], mass=None, inertia=None, noise_on=False):
+    """
+    Module that combines the quadrotor model and the controller.
+    """
+    def __init__(self, dt, kp=[[1.],[1.],[1.]], kv=[[1.],[1.],[1.]], kw=[[1.],[1.],[1.]], kr=[[1.],[1.],[1.]], mass=None, inertia=None, noise_on=False, collect_controls=False):
+        """
+        Initialize the quadrotor controller module.
+        
+        Parameters:
+        -----------
+        dt: float
+            time step of the simulation in seconds
+        kp: list
+            list of proportional gains for the position controller
+        kv: list
+            list of proportional gains for the velocity controller
+        kw: list
+            list of proportional gains for the angular velocity controller
+        kr: list
+            list of proportional gains for the rotation controller
+        mass: torch.Tensor
+            mass of the quadrotor
+        inertia: torch.Tensor
+            inertia of the quadrotor
+        noise_on: bool
+            if true, the simulation will be run with noise
+        collect_controls: bool
+            if true, the controls will be collected during simulation
+        """
         super().__init__()
         self.quadrotor = QuadrotorAutograd(noise_on=noise_on)
         self.quadrotor.dt = dt
+
+        self.collect_controls = collect_controls
 
         # If mass and inertia are given initialize controller accordingly
         if mass is not None and inertia is not None:
@@ -88,14 +117,21 @@ class QuadrotorControllerModule(nn.Module):
         y = []
         Rds = []
         desWs = []
+        if self.collect_controls:
+            controls = []
         for setpoint in setpoints:
             y += [current_state]
             thrustSI, torque, Rd, desW = self.controller.compute_controls(current_state=current_state, setpoint=setpoint)
             Rds += [Rd]
             desWs += [desW]
             force = self.quadrotor.B0.inverse() @ torch.concat([thrustSI, torque], dim=1)
-            current_state = self.quadrotor.step(state=current_state, force=force.squeeze(-1))
-        return torch.stack(y, dim=0), torch.stack(Rds, dim=0), torch.stack(desWs, dim=0) # time first in -> time first out
+            if self.collect_controls:
+                controls += force
+            current_state = self.quadrotor.step(state=current_state, force=force.squeeze(-1), dt=self.quadrotor.dt)
+        if self.collect_controls:
+            return torch.stack(y, dim=0), torch.stack(Rds, dim=0), torch.stack(desWs, dim=0), torch.stack(controls, dim=0) # time first in -> time first out
+        else:
+            return torch.stack(y, dim=0), torch.stack(Rds, dim=0), torch.stack(desWs, dim=0) # time first in -> time first out
 
 class QuadrotorControllerLoss(nn.Module):
     def __init__(self, loss_fn='L1', positional_weight=1.0, velocity_weight=1.0, rotational_weight=1.0, omega_weight=1.0):
@@ -183,25 +219,16 @@ def train_quadrotor_controller_module(model, criterion, optimizer, trainloader, 
         position_loss, velocity_loss, rotational_loss, omega_loss = criterion(states.transpose(0,1), setpoints, Rds.transpose(0,1), desWs.squeeze(-1).transpose(0,1))
         loss = position_loss + velocity_loss + rotational_loss + omega_loss
         loss.backward()
-        # for parameter in model.parameters():
-        #     if parameter.grad is not None:
-        #         with torch.no_grad():
-        #             parameter.grad = torch.clamp(parameter.grad, -clip_gradient_norm*torch.abs(parameter), clip_gradient_norm*torch.abs(parameter))
         for parameter in model.parameters():
             if parameter.grad is not None:
                 with torch.no_grad():
-                    # new fancy gradient projection method
                     relative_grad = parameter.grad / parameter
                     r_max = 0.0
                     for r in relative_grad:
-                        if torch.abs(r) > clip_gradient_norm:
-                            if torch.abs(r) > r_max:
-                                r_max = torch.abs(r)
+                        if torch.abs(r) > clip_gradient_norm and torch.abs(r) > r_max:
+                            r_max = torch.abs(r)
                     if r_max > 0.0:
-                        relative_grad = relative_grad / r_max * clip_gradient_norm
                         parameter.grad = relative_grad * parameter
-                    # parameter.grad = torch.clamp(parameter.grad, -clip_gradient_norm*torch.abs(parameter), clip_gradient_norm*torch.abs(parameter))
-                    # print(parameter.grad)
         optimizer.step()
 
         with torch.no_grad():
