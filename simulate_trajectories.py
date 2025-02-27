@@ -5,8 +5,29 @@ import torch
 from torch.utils.data import TensorDataset
 
 from quadrotor_pytorch import QuadrotorAutograd
+from train_lee_controller import QuadrotorControllerModule, NthOrderTrajectoryDataset
+
+from trajectories import f, fdot, fdotdot, fdotdotdot
+
+import utils_visualize as vis
+
+class QuadrotorControllerSimulationModule(QuadrotorControllerModule):
+    """
+    Basically the same as the QuadrotorControllerModule but with explicit support of passing 
+    seperate inertia and mass to the quadrotor and the controller.
+    """
+    def __init__(self, dt, kp=[[1.],[1.],[1.]], kv=[[1.],[1.],[1.]], kw=[[1.],[1.],[1.]], kr=[[1.],[1.],[1.]], controller_mass=None, controller_inertia=None, noise_on=False, collect_controls=False, quadrotor_mass=None, quadrotor_inertia=None):
+        super().__init__(dt, kp=kp, kv=kv, kw=kw, kr=kr, mass=controller_mass, inertia=controller_inertia, noise_on=noise_on, collect_controls=collect_controls)
+        if quadrotor_mass is not None:
+            self.quadrotor.m = torch.tensor(quadrotor_mass, dtype=torch.double)
+        if quadrotor_inertia is not None:
+            self.quadrotor.I = torch.tensor(quadrotor_inertia, dtype=torch.double)
+
 
 class QuadrotorSimulator():
+    """
+    Class to simulate the quadrotor dynamics
+    """
     def __init__(self, dt, mass=None, J=None):
         super(QuadrotorSimulator, self).__init__()
         self.dynamics_model = QuadrotorAutograd()
@@ -52,9 +73,7 @@ class QuadrotorSimulator():
         # data with columns: timestamp, x, y, z, vx, vy, vz, qx, qy, qz, qw, roll, pitch, yaw, m1, m2, m3, m4
         data = torch.empty((T, 18),dtype=torch.float64)
 
-        # sample random starting positions
-        # state = torch.rand((1,13), dtype=torch.float64)
-        # state = state * (self.dynamics_model.max_x - self.dynamics_model.min_x) + self.dynamics_model.min_x
+        # set initial state
         state = torch.tensor([[0.,0.,0.5, 0.,0.,0.,1.,0.,0.,0.,0.,0.,0.]],dtype=torch.float64)
         action = torch.rand((1,4), dtype=torch.float64)
         action = action * (25_000 - 21_000) + 21_000
@@ -95,18 +114,51 @@ class QuadrotorSimulator():
         if file is not None:
             torch.save(dataset, file)
 
+def simulate_trajectory_with_controls(trajectory_path, dt, visualize=True):
+    """
+    Simulate a trajectory with a given path
+    
+    Parameters:
+    -----------
+        trajectory_path: str
+            Path to the trajectory file
+        
+        dt: float
+            Sampling rate for the trajectory
+        
+        visualize: bool
+            If True, visualize the trajectory
+    """
+    # load dataset
+    trajectory_data = NthOrderTrajectoryDataset(trajectory_path,[f, fdot, fdotdot, fdotdotdot], dt=dt, transform=torch.tensor)
+
+    # create simulation module
+    simulation = QuadrotorControllerSimulationModule(dt=dt,kp=9.0, kv=7.0, kr=0.0055, kw=0.0013, collect_controls=True)
+
+    # simulate trajectory
+    states, _, _, controls = simulation(trajectory_data[0][:,None,:])
+
+    states = states.detach().numpy()[:,0,:]
+    controls = controls.detach().numpy()[:,:,0]
+    t = args.dt * np.arange(0, controls.shape[0])[:,None]
+    x = np.concat([t, states, controls], axis=1)
+
+    # save simulation data
+    trajectory_name = trajectory_path.split('.')[0]
+    np.save(f'simulated_{trajectory_name}.npy', x)
+
+    # visualize trajectory
+    if visualize:
+        # plot the trajectories (desired vs true)
+        vis.plot_trajectory(states, trajectory_data[0])
+
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--file-name", type=str, help='file name to save data')
+    parser.add_argument("--file-name", type=str, default='figure8.csv', help='file name to save data')
     parser.add_argument("--N", type=int, default=1000, help='trajectory length to generate')
     parser.add_argument("--dt", type=float, default=0.01, help='sampling rate for trajectory')
     parser.add_argument("--generate-pairwise", type=bool, default=False)
     args = parser.parse_args()
 
-    simulator = QuadrotorSimulator(dt=args.dt)
-
-    if args.generate_pairwise:
-        simulator.generate_pairwise_dataset(N=args.N, file=args.file_name)
-    else:
-        simulator.generate_trajectory(T=args.N, file=args.file_name)
+    simulate_trajectory_with_controls(args.file_name, args.dt, visualize=True)
