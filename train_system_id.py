@@ -3,27 +3,31 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import re
-import roma
 import time
 import torch
 from tqdm import tqdm
 
-from data import cfusdlog
+
+
 from distutils.util import strtobool
-from torch.utils.data.dataset import TensorDataset, Dataset
+from torch.utils.data.dataset import TensorDataset
 from torch.utils.tensorboard import SummaryWriter
 from quadrotor_pytorch import QuadrotorAutograd 
-from utils import vee_so3, slice_dataset
 
 from torch import nn
 from torch import optim
 from torch.utils.data import DataLoader
+from datasets import FlightDataset, SimulatedDataset
+from losses import QuadrotorLoss
+
+import utils_visualize as vis
 
 
 class QuadrotorSimulationModule(nn.Module):
-    def __init__(self, **kwargs):
+    def __init__(self, control_type='rpm', **kwargs):
         super().__init__()
         self.quadrotor = QuadrotorAutograd(**kwargs)
+        self.control_type = control_type
 
         # optimize mass
         self.mass = nn.Parameter(torch.tensor([self.quadrotor.m]))
@@ -52,151 +56,145 @@ class QuadrotorSimulationModule(nn.Module):
         """
         current_state = s_0
         states = [current_state]
+        if self.control_type == 'rpm':
+            controls = self.quadrotor._rpm_to_force(controls)
+        elif self.control_type == 'pwm':
+            raise NotImplementedError()
+        elif self.control_type != 'forces':
+            raise ValueError(f"Unknown control type {self.control_type}")
+
         for i, control in enumerate(controls):
-            force = self.kf * 1e-10 * torch.pow(control,2)  # motor controls to force
             if dts is not None:
                 dt = dts[i]
             else:
                 dt = self.quadrotor.dt
-            current_state = self.quadrotor.step(state=current_state, force=force, dt=dt)
+            current_state = self.quadrotor.step(state=current_state, force=control, dt=dt)
             states += [current_state]
-        # state = x[:,0:13]
-        # kf = 1e-10
-        # print(self.kf, x)
-        # force = self.kf * 1e-10 * torch.pow(x[:,13:], 2)  # motor controls to force
-        # force = self.kf * x[0, 13:]
-        # print(force)
-        # exit()
-        # print(x[0,13:], force)
-        # exit()
-        # print(torch.sum(force))
-        # next_state = self.quad.step(state, force)
-
-        # return next_state
         return torch.stack(states, dim=0)
-
-
-# quaternion norm (adopted from rowan)
-def qnorm(q):
-    return torch.linalg.norm(q, dim=-1, keepdim=True)
-
-# quaternion sym distance (adopted from rowan)
-def qsym_distance(p, q):
-    return torch.minimum(qnorm(p - q), qnorm(p + q))
-
-class QuadrotorLoss(nn.Module):
-    def __init__(self):
-        super(QuadrotorLoss, self).__init__()
-
-    def forward(self, input, target):
-        # print(input, target)
-        position_loss = torch.nn.functional.mse_loss(input[...,0:3], target[...,0:3])
-        velocity_loss = torch.nn.functional.mse_loss(input[...,3:6], target[...,3:6])
-        # transform quaternions to rotation matrices and compute error in SO(3)
-        R_input = roma.unitquat_to_rotmat(input[...,6:10])
-        R_target = roma.unitquat_to_rotmat(target[...,6:10])
-        angle_errors = 0.5 * vee_so3(R_target.transpose(-2,-1) @ R_input - R_input.transpose(-2,-1) @ R_target)
-        angle_loss = torch.mean(angle_errors)
-        omega_loss = torch.nn.functional.mse_loss(input[...,10:13], target[...,10:13])
-        return position_loss, velocity_loss, angle_loss, omega_loss
-
-class FlightDataset(Dataset):
-    def __init__(self, file_name, transform, window_size=None):
-        super().__init__()
-        self.raw_dts, self.raw_states, self.raw_controls = load_cfusd(file_name)
-        self.window_size = window_size
-        self.transform = transform
-        if self.window_size is None:
-            self.window_size = len(self.raw_states)
-        self.slice_into_windows(window_size=self.window_size)
     
-    def __len__(self):
-        return len(self.states)
+def compute_sample_grad(model, s_0, controls, dts, targets):
+    """
+    Compute the gradient of the loss w.r.t. the model parameters for a single sample.
+    """
+    s_0 = s_0.unsqueeze(0)
+    controls = controls.unsqueeze(0)
+    dts = dts.unsqueeze(0)
+    targets = targets.unsqueeze(0)
+
+    # compute simulated next states
+    simulated_states = model(s_0=s_0, controls=controls.transpose(0,1), dts=dts.transpose(0,1))
+    position_loss, velocity_loss, angle_loss, omega_loss = criterion(simulated_states.transpose(0,1)[:,1:,:], targets)
+    loss = position_loss + velocity_loss + angle_loss + omega_loss
+    grad = torch.autograd.grad(loss, model.parameters(), create_graph=False)
+    return grad
+
+def compute_grad(model, s_0, controls, dts, targets):
+    batch_size = s_0.shape[0]
+    sample_grads = [compute_sample_grad(model, s_0[i], controls[i], dts[i], targets[i]) for i in range(batch_size)]
+    sample_grads = zip(*sample_grads)
+    sample_grads = [torch.stack(shards) for shards in sample_grads]
+    return sample_grads
+
+def compute_sample_jacobian(model, s_0, controls, dts):
+    """
+    Compute the jacobian of the simulated states w.r.t. the model parameters for a single sample.
+    """
+    s_0 = s_0.unsqueeze(0)
+    controls = controls.unsqueeze(0)
+    dts = dts.unsqueeze(0)
+
+    # compute simulated next states
+    simulated_states = model(s_0=s_0, controls=controls.transpose(0,1), dts=dts.transpose(0,1))
+    simulated_targets = simulated_states.transpose(0,1)[:,1:,:] # skip the first state
+
+    grads = []
+
+    # compute the gradient for each element in the state vector
+    for i in range(simulated_targets.shape[-1]):
+        grad = torch.autograd.grad(simulated_targets[..., i], model.parameters(), create_graph=True)
+        grads.append(grad)
+    grads = zip(*grads)
+    jacobians = [torch.stack(shards) for shards in grads]
+    return jacobians
+
+def compute_sample_fim(model, s_0, controls, dts):
+    jacobian = compute_sample_jacobian(model, s_0, controls, dts)
+    jacobian = torch.cat(jacobian, axis=-1)
+    return jacobian.T @ jacobian
+
+def compute_fim(model, s_0, controls, dts):
+    batch_size = s_0.shape[0]
+    sample_fims = [compute_sample_fim(model, s_0[i], controls[i], dts[i]) for i in range(batch_size)]
+    fims = torch.stack(sample_fims)
+    return fims
+
+# TODO: adapt the code to work for the stochastic case e.g. real world flight data with noise and delays
+
+def train_quadrotor_system_identification(model, criterion, optimizer, trainloader, clip_gradient_norm=0.1, use_fim=True, compute_batch_fim=True):
+    """
+    Train the quadrotor system identification model for one epoch.
     
-    def __getitem__(self, idx):
-        states_window = self.states[idx]
-        controls_window = self.controls[idx]
-        dts_window = self.dts[idx]
-        if self.transform:
-            states_window = self.transform(states_window)
-            controls_window = self.transform(controls_window)
-        return dts_window, states_window, controls_window
-    
-    def slice_into_windows(self, window_size):
-        """
-        Slices the dataset into windows of a given length.
-        """
-        dataset_size = len(self.raw_states)
-        if window_size > dataset_size:
-            window_size = dataset_size
-        self.window_size = window_size
-        self.states = slice_dataset(self.raw_states, window_size=window_size)
-        
-        dataset_size = len(self.raw_dts)
-        N = dataset_size // (window_size-1)  # number of segments
-        dts_splits = np.split(self.raw_dts[:N*(window_size-1)], N, axis=0)
-        self.dts = np.stack(dts_splits, axis=0)
-        control_splits = np.split(self.raw_controls[:N*(window_size-1)], N, axis=0)
-        self.controls = np.stack(control_splits, axis=0)
-
-# def train_loop(dataloader, model: nn.Module, loss_fn, optimizer):
-#     size = len(dataloader.dataset)
-#     training_loss = 0
-
-#     model.train()
-
-#     for batch, (X, y) in enumerate(dataloader):
-#         # Compute prediction and loss
-#         pred = model(X)
-#         loss = loss_fn(pred, y)
-
-#         # Backpropagation
-#         optimizer.zero_grad()
-#         loss.backward()
-#         clip_gradient_norm = 0.1
-#         for parameter in model.parameters():
-#             if parameter.grad is not None:
-#                 with torch.no_grad():
-#                     parameter.grad = torch.clamp(parameter.grad, -clip_gradient_norm*torch.abs(parameter), clip_gradient_norm*torch.abs(parameter))
-#             print(parameter.grad)
-#         optimizer.step()
-
-#         training_loss += loss.item()
-
-#         # if batch % 100 == 0:
-#         #     loss, current = loss.item(), batch * len(X)
-#         #     print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
-
-#     training_loss /= size
-#     print(f"Training Error: \n Avg loss: {training_loss:>8f} \n")
-#     return training_loss
-
-
-def train_quadrotor_system_identification(model, criterion, optimizer, trainloader, clip_gradient_norm=0.1):
+    Parameters:
+    -----------
+    model: nn.Module
+        the model to be trained
+    criterion: nn.Module
+        the loss function to be optimized
+    optimizer: torch.optim.Optimizer
+        the optimizer to be used for optimization
+    trainloader: DataLoader
+        the dataloader providing the training data
+    clip_gradient_norm: float
+        the maximum norm of the gradients relative to the parameter values
+    use_fim: bool
+        if toggled, the Fisher Information Matrix will be used for optimization
+    compute_batch_fim: bool
+        if toggled, the Fisher Information Matrix will be computed as average over each batch
+    """
     running_loss, running_position_loss, running_velocity_loss, running_angle_loss, running_omega_loss = 0.0, 0.0, 0.0, 0.0, 0.0
 
-    pbar = tqdm(total=len(trainloader))
     model.train()
     for batch_idx, (recorded_dts, recorded_states, recorded_controls) in enumerate(trainloader):  # recorded states
         optimizer.zero_grad()
-        simulated_states = model(s_0=recorded_states[:,0,:], controls=recorded_controls.transpose(0,1), dts=recorded_dts.transpose(0,1))
-        position_loss, velocity_loss, angle_loss, omega_loss = criterion(simulated_states.transpose(0,1), recorded_states)
-        loss = position_loss + velocity_loss + angle_loss + omega_loss
-        loss.backward()
+        if use_fim:
+            batch_grads = compute_grad(model, recorded_states[:,0,:], recorded_controls, recorded_dts, recorded_states[:,1:,:])
+            # compute the approximate Fisher Information Matrix
+            batch_fims = compute_fim(model, recorded_states[:,0,:], recorded_controls, recorded_dts)
+            with torch.no_grad():
+                # compute the projected gradients using the FIM
+                grads = torch.concat(batch_grads, dim=-1).unsqueeze(2)
+                if compute_batch_fim:
+                    batch_fims = batch_fims.mean(axis=0,keepdim=True)
+                    grads = grads.mean(axis=0,keepdim=True)
+                scaled_grads = torch.linalg.solve(batch_fims, grads).squeeze(2)
+
+                mass_grads = scaled_grads[:,:1]
+                inertia_grads = scaled_grads[:,1:]
+                batch_grads = [mass_grads, inertia_grads]
+
+                for parameter, grad in zip(model.parameters(), batch_grads):
+                    parameter.grad = grad.mean(axis=0)
+
+                simulated_states = model(s_0=recorded_states[:,0,:], controls=recorded_controls.transpose(0,1), dts=recorded_dts.transpose(0,1))
+                position_loss, velocity_loss, angle_loss, omega_loss = criterion(simulated_states.transpose(0,1)[:,1:,:], recorded_states[:,1:,:])
+                loss = position_loss + velocity_loss + angle_loss + omega_loss
+
+        if not use_fim:
+            simulated_states = model(s_0=recorded_states[:,0,:], controls=recorded_controls.transpose(0,1), dts=recorded_dts.transpose(0,1))
+            position_loss, velocity_loss, angle_loss, omega_loss = criterion(simulated_states.transpose(0,1)[:,1:,:], recorded_states[:,1:,:])
+            loss = position_loss + velocity_loss + angle_loss + omega_loss
+            loss.backward()
         for parameter in model.parameters():
             if parameter.grad is not None:
                 with torch.no_grad():
-                    # new fancy gradient projection method
+                    # gradient projection
                     relative_grad = parameter.grad / parameter
                     r_max = 0.0
                     for r in relative_grad:
-                        if torch.abs(r) > clip_gradient_norm:
+                        if torch.abs(r) > clip_gradient_norm and torch.abs(r) > r_max:
                             r_max = torch.abs(r)
-                        if r_max > 0.0:
-                            relative_grad = relative_grad / r_max * clip_gradient_norm
-                            parameter.grad = relative_grad * parameter
-                    # parameter.grad = torch.clamp(parameter.grad, -clip_gradient_norm*torch.abs(parameter), clip_gradient_norm*torch.abs(parameter))
-                    # print(parameter.grad)
+                    if r_max > 0.0:
+                        parameter.grad = parameter.grad / r_max * clip_gradient_norm
         optimizer.step()
 
         with torch.no_grad():
@@ -208,9 +206,6 @@ def train_quadrotor_system_identification(model, criterion, optimizer, trainload
         running_velocity_loss += velocity_loss.item()
         running_angle_loss += angle_loss.item()
         running_omega_loss += omega_loss.item()
-        pbar.set_description(f"loss={running_loss / (batch_idx+1):0.4g}")
-        pbar.update(1)
-    pbar.close()
     return running_loss / (batch_idx+1), running_position_loss / (batch_idx+1), running_velocity_loss / (batch_idx+1), running_angle_loss / (batch_idx+1), running_omega_loss / (batch_idx+1)
 
 
@@ -239,61 +234,6 @@ def pwm2force(pwm, vbat):
     C_11 = 38.42885066644033
     return (C_00 + C_10*pwm + C_01*vbat + C_20*pwm**2 + C_11*vbat*pwm) / 1000 * 9.81
 
-
-def load_cfusd(filename):
-    """
-    Load binary logged sensor data from the Crazyflie2. Returns a tensor with the state (position and quaternion rotation)
-    and its derivative (translational and rotational velocity) and the quadrotor control command
-
-    Parameters:
-    -----------
-    filename: str
-        name of the file the sensor data should be loaded from
-    
-    Returns:
-    --------
-    dt: float
-        Average timestep between states/controls in ms
-    states: torch.Tensor
-        Tensor containing the states and derivatives with shape (T, S) where T is the trajectory length, S is the state dimension
-    controls: torch.Tensor
-        Tensor containing the controls with shape (T, C) where T is the trajectory length and C is the control dimension
-    """
-    # decode binary log data
-    data_usd = cfusdlog.decode(filename)
-
-    T = len(data_usd['fixedFrequency']['timestamp'])
-
-    dts = np.diff(data_usd['fixedFrequency']['timestamp']) / 1000.0
-    dt = np.mean(dts)
-
-
-    states = np.empty((T, 13), dtype=np.float64)
-    controls = np.empty((T,4), dtype=np.float64)
-
-    states[:, 0] = data_usd['fixedFrequency']['stateEstimateZ.x'] / 1000.0
-    states[:, 1] = data_usd['fixedFrequency']['stateEstimateZ.y'] / 1000.0
-    states[:, 2] = data_usd['fixedFrequency']['stateEstimateZ.z'] / 1000.0
-    states[:, 3] = data_usd['fixedFrequency']['stateEstimateZ.vx'] / 1000.0
-    states[:, 4] = data_usd['fixedFrequency']['stateEstimateZ.vy'] / 1000.0
-    states[:, 5] = data_usd['fixedFrequency']['stateEstimateZ.vz'] / 1000.0
-    for t in range(T):
-        # q is in [x,y,z,w] format
-        q = cfusdlog.quatdecompress(
-            data_usd['fixedFrequency']['stateEstimateZ.quat'][t])
-        # [w,x,y,z] format
-        states[t, 6:7] = q[3:4]
-        states[t, 7:10] = q[0:3]
-    states[:, 10] = data_usd['fixedFrequency']['stateEstimateZ.rateRoll'] / 1000.0
-    states[:, 11] = data_usd['fixedFrequency']['stateEstimateZ.ratePitch'] / 1000.0
-    states[:, 12] = data_usd['fixedFrequency']['stateEstimateZ.rateYaw'] / 1000.0
-
-    controls[:, 0] = data_usd['fixedFrequency']['rpm.m1']
-    controls[:, 1] = data_usd['fixedFrequency']['rpm.m2']
-    controls[:, 2] = data_usd['fixedFrequency']['rpm.m3']
-    controls[:, 3] = data_usd['fixedFrequency']['rpm.m4']
-    
-    return dts, states, controls
 
 def load_csv(file_name):
     """
@@ -337,28 +277,42 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=str, default="data")
-    parser.add_argument("--file-train", type=str, default='figure8_100hz')
-    parser.add_argument("--file-test", type=str, default='hover_100hz')
-    parser.add_argument("--window-size", type=int, default=3,
+    parser.add_argument("--file-train", type=str, default='figure8_500hz')
+    parser.add_argument("--file-test", type=str, default='hover_500hz')
+    parser.add_argument("--window-size", type=int, default=2,
                         help='the length of the time windows the trajectory is cut into for training')
-    parser.add_argument("--lr", type=float, default=1.0,
+    parser.add_argument("--lr", type=float, default=0.1,
                         help='the learning rate of the optimizer')
-    parser.add_argument("--epochs", type=int, default=100,
+    parser.add_argument("--epochs", type=int, default=1000,
                         help='number of epochs to run the optimization')
-    parser.add_argument('--batch-size', type=int, default=8,
+    parser.add_argument('--batch-size', type=int, default=4096,
                         help='the size of the batches for training')
     parser.add_argument('--double-window-size-on-plateau', type=lambda x: bool(strtobool(x)), default=True,
                         help='if toggled, the window size will double if the training loss does not decrease any more')
     parser.add_argument('--num-epochs-plateau', type=int, default=5,
                         help='number of epochs to wait on plateau before window size is doubled')
+    parser.add_argument('--clip-gradient-norm', type=float, default=0.2,
+                        help='maximum norm of the gradients relative to the parameter values')
     parser.add_argument('--visualize-trajectory', type=lambda x: bool(strtobool(x)) ,default=True,
                         help='Toggles whether or not the trajectory should be visualized after training')
     parser.add_argument('--report-parameters', type=lambda x: bool(strtobool(x)) ,default=True,
                         help='Toggles whether or not the current gains are reported during training')
     parser.add_argument('--track', type=lambda x: bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='if toggled, this experiment will be tracked with Weights and Biases')
-    parser.add_argument('--max-window-size', type=int, default=400,
+    parser.add_argument('--max-window-size', type=int, default=2,
                         help='maximum window size to extend the trajectories to')
+    parser.add_argument('--control-type', type=str, default='rpm',
+                        help="type of the provided controls in the dataset available are 'rpm' and 'forces'")
+    parser.add_argument('--skip-first-n', type=int, default=0,
+                        help='number of initial states to skip in the dataset')
+    parser.add_argument('--drop-last-n', type=int, default=0,
+                        help='number of last states to skip in the dataset')
+    parser.add_argument('--run-name', type=str, default=None,
+                        help='name of the run for the tensorboard logs')
+    parser.add_argument('--use-fim', type=lambda x: bool(strtobool(x)), default=True,
+                        help='if toggled, the Fisher Information Matrix will be used for optimization')
+    parser.add_argument('--compute-batch-fim', type=lambda x: bool(strtobool(x)), default=True,
+                        help='if toggled, the Fisher Information Matrix will be computed as average over each batch')
     args = parser.parse_args()
 
     train_file_path = os.path.join(args.data_dir, args.file_train)
@@ -366,19 +320,41 @@ if __name__ == '__main__':
     
     torch.autograd.set_detect_anomaly(True)
 
-    train_dataset = FlightDataset(file_name=train_file_path, transform=torch.tensor)
-    train_dataset.slice_into_windows(window_size=args.window_size)
-    test_dataset = FlightDataset(file_name=test_file_path, transform=torch.tensor)
+    if args.control_type == 'rpm':
+        train_dataset = FlightDataset(data_path=train_file_path, transform=torch.tensor, window_size=args.window_size)
+        test_dataset = FlightDataset(data_path=test_file_path, transform=torch.tensor)
+        train_dataset.raw_states = [raw_states[args.skip_first_n:-1-args.drop_last_n,...] for raw_states in train_dataset.raw_states]
+        train_dataset.raw_controls = [raw_controls[args.skip_first_n:-1-args.drop_last_n,...] for raw_controls in train_dataset.raw_controls]
+        train_dataset.raw_dts = [raw_dts[args.skip_first_n:-1-args.drop_last_n,...] for raw_dts in train_dataset.raw_dts]
+        train_dataset._slice_into_windows(window_size=args.window_size)
+    elif args.control_type == 'pwm':
+        raise NotImplementedError()
+    elif args.control_type == 'forces':
+        train_dataset = SimulatedDataset(data_path=train_file_path, transform=torch.tensor, window_size=args.window_size)
+        test_dataset = SimulatedDataset(data_path=test_file_path, transform=torch.tensor)
+        train_dataset.raw_states = [raw_states[args.skip_first_n:-1-args.drop_last_n,...] for raw_states in train_dataset.raw_states]
+        train_dataset.raw_controls = [raw_controls[args.skip_first_n:-1-args.drop_last_n,...] for raw_controls in train_dataset.raw_controls]
+        train_dataset.raw_dts = [raw_dts[args.skip_first_n:-1-args.drop_last_n,...] for raw_dts in train_dataset.raw_dts]
+        train_dataset._slice_into_windows(window_size=args.window_size)
+    else:
+        raise NotImplementedError()
 
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False)
     test_dataloader = DataLoader(test_dataset, batch_size=1)
 
-    quadrotor_simulation_module = QuadrotorSimulationModule(mass=1.0, inertia=[0.01, 0.01, 0.01])
+    # quadrotor_simulation_module = QuadrotorSimulationModule(mass=0.1, inertia=[1e-7, 1e-7, 1e-7])
+    # quadrotor_simulation_module = QuadrotorSimulationModule(mass=0.0372, inertia=[0.00040461156978587395, 0.015359155239051424, 0.012904881083249622])
+    # quadrotor_simulation_module = QuadrotorSimulationModule(control_type=args.control_type, mass=0.034, inertia=[16.571710e-6, 16.655602e-6, 29.261652e-6])
+    quadrotor_simulation_module = QuadrotorSimulationModule(control_type=args.control_type, mass=0.1, inertia=[0.01,0.01,0.01])
 
-    criterion = QuadrotorLoss()
+    criterion = QuadrotorLoss(reduce='mean')
     optimizer = optim.SGD(quadrotor_simulation_module.parameters(), lr=args.lr)
+    
+    if args.run_name is None:
+        run_name = f'quadrotor_system_id__{int(time.time())}'
+    else:
+        run_name = args.run_name
 
-    run_name = f'quadrotor_system_id__{int(time.time())}'
     if args.track:
         writer = SummaryWriter(f"runs/parameters_{run_name}")
     else:
@@ -387,10 +363,21 @@ if __name__ == '__main__':
     if args.double_window_size_on_plateau:
         best_loss = torch.inf
         iterations_since_decrease = 0
+    
+    if writer is not None:
+        fig, ax = vis.plot_trajectory(train_dataset.raw_states[0], title='Training trajectory', show=False)
+        writer.add_figure("trajectory/trajectory", fig, global_step=0)
+        writer.add_scalar("parameters/window_size", args.window_size, global_step=0)
+        writer.add_scalar("physical_parameters/mass", quadrotor_simulation_module.mass, global_step=0)
+        writer.add_scalars("physical_parameters/inertia", {'x':quadrotor_simulation_module.inertia[0],
+                                                           'y':quadrotor_simulation_module.inertia[1],
+                                                           'z':quadrotor_simulation_module.inertia[2]}, global_step=0)
 
-    for epoch in range(args.epochs):
+    pbr = tqdm(total=args.epochs)
+    for epoch in range(1,args.epochs+1):
         loss, position_loss, velocity_loss, angle_loss, omega_loss = train_quadrotor_system_identification(
-            model=quadrotor_simulation_module, criterion=criterion, optimizer=optimizer, trainloader=train_dataloader
+            model=quadrotor_simulation_module, criterion=criterion, optimizer=optimizer, trainloader=train_dataloader, clip_gradient_norm=args.clip_gradient_norm,
+            use_fim=args.use_fim, compute_batch_fim=args.compute_batch_fim
         )
         
         if writer is not None:
@@ -400,7 +387,9 @@ if __name__ == '__main__':
             writer.add_scalar("loss/omega_loss", omega_loss, global_step=epoch)
             writer.add_scalar("parameters/window_size", args.window_size, global_step=epoch)
             writer.add_scalar("physical_parameters/mass", quadrotor_simulation_module.mass, global_step=epoch)
-            writer.add_scalar("physical_parameters/inertia", quadrotor_simulation_module.inertia, global_step=epoch)
+            writer.add_scalars("physical_parameters/inertia", {'x':quadrotor_simulation_module.inertia[0],
+                                                               'y':quadrotor_simulation_module.inertia[1],
+                                                               'z':quadrotor_simulation_module.inertia[2]}, global_step=epoch)
 
         if args.double_window_size_on_plateau:
             if loss < best_loss - 1e-4:
@@ -413,20 +402,26 @@ if __name__ == '__main__':
                 args.window_size *= 2
                 if args.window_size > args.max_window_size:
                     args.window_size = args.max_window_size
-                train_dataset.slice_into_windows(window_size=args.window_size)
+                train_dataset._slice_into_windows(window_size=args.window_size)
                 iterations_since_decrease = 0
                 best_loss = torch.inf
         
         if args.report_parameters:
             with torch.no_grad():
-                print(f"Parameters after {epoch+1} epochs:\nmass={quadrotor_simulation_module.mass}\tinertia={quadrotor_simulation_module.inertia.tolist()}")
+                print(f"Parameters after {epoch} epochs:\nmass={quadrotor_simulation_module.mass.item()}\tinertia={quadrotor_simulation_module.inertia.tolist()}")
+        pbr.update(1)
+    pbr.close()
         
     if writer is not None:
         writer.close()
     
     if args.visualize_trajectory:
-        controls = torch.tensor(train_dataset.raw_controls, dtype=torch.double)
-        true_states = torch.tensor(train_dataset.raw_states, dtype=torch.double)
+        controls = torch.tensor(train_dataset.raw_controls[0], dtype=torch.double)
+        true_states = torch.tensor(train_dataset.raw_states[0], dtype=torch.double)
+        print("####### Running the trajectory with optimized parameters #######")
+        print("Mass: ", quadrotor_simulation_module.mass)
+        print("Inertia: ", quadrotor_simulation_module.inertia)
+        print("Length of the trajectory:",len(true_states))
         simulated_states = run_trajectory(quadrotor_simulation_module, controls=controls, s_0=true_states[:1,:])
         ax = plt.figure().add_subplot(projection='3d')
         ax.plot(simulated_states[:,0], simulated_states[:,1], simulated_states[:,2], label='simulated trajectory')
@@ -437,57 +432,3 @@ if __name__ == '__main__':
         ax.set_zlabel('Z')
         ax.view_init(elev=20, azim=-35, roll=0)
         plt.show()
-
-
-    ### 
-    # Old code
-
-
-    # if train_file_path.endswith('.csv'):
-    #     dt, training_data = load_csv(train_file_path)
-    # elif train_file_path.endswith('.pt'):
-    #     dt, training_data = load_dataset(train_file_path)
-    # else:
-    #     dt, training_data = load_cfusd(train_file_path)
-    
-    # if test_file_path.endswith('.csv'):
-    #     dt2, test_data = load_csv(test_file_path)
-    # elif test_file_path.endswith('.pt'):
-    #     dt2, test_data = load_dataset(test_file_path)
-    # else:
-    #     dt2, test_data = load(test_file_path)
-
-    # train_dataloader = DataLoader(training_data, batch_size=1024, shuffle=True)
-    # test_dataloader = DataLoader(test_data, batch_size=1024)
-
-
-    # model = QuadrotorSimulationModule(dt, mass=1.)
-
-    # # loss_fn = nn.MSELoss()
-    # loss_fn = QuadrotorLoss()
-
-    # learning_rate = 1
-    # epochs = 1000
-    # train_losses, test_losses = [], []
-
-    # optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
-
-    # for t in range(epochs):
-    #     print(f"Epoch {t+1}\n-------------------------------")
-    #     train_loss = train_loop(train_dataloader, model, loss_fn, optimizer)
-    #     test_loss = test_loop(test_dataloader, model, loss_fn)
-    #     train_losses.append(train_loss)
-    #     test_losses.append(test_loss)
-    # print("Done!")
-    # print(model.state_dict())
-
-    # plt.plot(range(epochs), train_losses, label="training error")
-    # plt.plot(range(epochs), test_losses, label="test error")
-    # plt.xlabel('epoch')
-    # plt.ylabel('error')
-    # plt.legend()
-    # plt.title("Train and test error over epochs")
-    # plt.show()
-
-
-
