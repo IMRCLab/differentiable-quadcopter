@@ -31,6 +31,8 @@ def spline_segment(func, coeffs, ts):
 
     return func(coeffs, ts)
 
+# TODO: This can be done more efficiently e.g. by using the classes from the uav_trajectories package
+# https://github.com/Khaledwahba1994/uav_trajectories
 
 def f(coeffs, t):
     """
