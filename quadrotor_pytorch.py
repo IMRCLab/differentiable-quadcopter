@@ -26,7 +26,6 @@ def qexp_zero_norm(q):
 	result_w = e
 	return torch.cat((result_w, result_v), dim=-1)
 
-
 def qexp(q):
 	"""
 	Adopted from rowan
@@ -37,6 +36,7 @@ def qexp(q):
 	expo[...,0] = e * torch.cos(norms)
 	norm_zero = torch.isclose(norms, torch.zeros_like(norms))
 	not_zero = torch.logical_not(norm_zero)
+
 	if torch.any(not_zero):
 		expo[not_zero,1:] = (
 			e[not_zero, torch.newaxis]
@@ -49,12 +49,6 @@ def qexp(q):
 		expo[..., 1:] = 0
 	
 	return expo
-	# if torch.allclose(q[...,1:4], torch.zeros_like(q[...,1:4])):
-	# 	return qexp_zero_norm(q)
-	# else:
-	# 	return qexp_regular_norm(q)
-	# gradient computation using where is not working properly
-	# return torch.where(torch.all(torch.isclose(q[...,1:4], torch.zeros_like(q[...,1:4])), dim=-1,keepdim=True), qexp_zero_norm(q), qexp_regular_norm(q))
 
 def qintegrate(q, v, dt):
 	quat_v = torch.cat((torch.zeros((v.shape[0],1)), v*dt/2),dim=-1)
@@ -67,9 +61,11 @@ def qnormalize(q):
 class QuadrotorAutograd():
 
 	def __init__(self, noise_on=False, mass=0.034, inertia=[16.571710e-6, 16.655602e-6, 29.261652e-6]):
+		# control limits in Newtons (same for each rotor)
 		self.min_u = 0
 		self.max_u = 12 / 1000 * 9.81
 
+		# feasible state space
 		self.min_x = torch.tensor(
 					[-10, -10, -10, 					# Position
 					  -3, -3, -3, 						# Velocity [m/s]
@@ -91,6 +87,8 @@ class QuadrotorAutograd():
 		arm_length = 0.046 # m
 		arm = 0.707106781 * arm_length
 		t2t = 0.006 # thrust-to-torque ratio
+
+		# control forces per rotor to thrust+force vector 
 		self.B0 = torch.tensor([
 			[1, 1, 1, 1],
 			[-arm, -arm, arm, arm],
@@ -98,6 +96,8 @@ class QuadrotorAutograd():
 			[-t2t, t2t, -t2t, t2t]
 			], dtype=torch.float64)
 		self.g = 9.81 # not signed
+
+		self.kf = 2.1
 
 		# if self.I.shape == (3,3):
 		# 	self.inv_I = torch.linalg.pinv(self.I) # full matrix -> pseudo inverse
@@ -107,19 +107,20 @@ class QuadrotorAutograd():
 		self.dt = 0.01
 		self.noise_on = noise_on
 
+	def _rpm_to_force(self, controls):
+		return self.kf * 1e-10 * torch.pow(controls,2)  # motor controls to force
 
 	def step(self, state, force, dt):
 		# compute next state
 		q = state[...,6:10]
 		omega = state[...,10:]
 
-		# eta = torch.mv(self.B0, force)
-		# TODO: this line might be wrong - instead: eta = self.B0 @ force
+		# clip for to control limits
+		force = torch.clamp(force, self.min_u, self.max_u)
+
 		eta = force @ self.B0.T
-		# f_u = torch.tensor([0,0,eta[0]])
 		batch_size = state.shape[0]
 		f_u = torch.cat((torch.zeros((batch_size, 2)),eta[...,:1]),dim=-1)
-		# tau_u = torch.tensor([eta[1],eta[2],eta[3]])
 		tau_u = eta[...,1:]
 
 		# dynamics 
@@ -136,13 +137,11 @@ class QuadrotorAutograd():
 		# https://www.ashwinnarayan.com/post/how-to-integrate-quaternions/, and
 		# https://arxiv.org/pdf/1604.08139.pdf
 		omega_global = qrotate(q, omega)
-		# omega_global = omega
 		q_next = qnormalize(qintegrate(q, omega_global, dt))
 
 		# mI = Iw x w + tau_u
 		inv_I = 1 / self.I  # diagonal matrix -> division
 		omega_next = state[...,10:] + (inv_I * (torch.cross(self.I * omega,omega, dim=-1) + tau_u)) * dt
-		# omega_next = state[..., 10:] + inv_I * omega # * tau_u * self.dt # simplified dynamics
 
 		return torch.cat((pos_next, vel_next, q_next, omega_next), dim=-1)
 
