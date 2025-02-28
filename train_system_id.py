@@ -128,7 +128,6 @@ def compute_fim(model, s_0, controls, dts):
     fims = torch.stack(sample_fims)
     return fims
 
-# TODO: adapt the code to work for the stochastic case e.g. real world flight data with noise and delays
 def train_quadrotor_system_identification(model, criterion, optimizer, trainloader, clip_gradient_norm=0.1, use_fim=True, compute_batch_fim=True, use_tikonov=True):
     """
     Train the quadrotor system identification model for one epoch.
@@ -170,9 +169,6 @@ def train_quadrotor_system_identification(model, criterion, optimizer, trainload
             # compute FIM using the noise covariance matrix
             batch_fims =  (batch_cov @ grads) @ grads.transpose(1,2)
 
-
-
-
             # compute the approximate Fisher Information Matrix using the sensitivity gradients
             # batch_fims = compute_fim(model, recorded_states[:,0,:], recorded_controls, recorded_dts)
             
@@ -195,7 +191,6 @@ def train_quadrotor_system_identification(model, criterion, optimizer, trainload
 
                 scaled_grads = torch.linalg.solve(batch_fims, grads).squeeze(2)
                 # Idea: Filter out the samples where the FIM is singular
-
 
                 mass_grads = scaled_grads[:,:1]
                 inertia_grads = scaled_grads[:,1:]
