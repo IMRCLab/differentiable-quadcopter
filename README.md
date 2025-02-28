@@ -77,3 +77,5 @@ In the `use_batch_fim = False` the individual FIMs are kept and each gradient is
 ### Further investigation
 The conditioning of the FIM is extremly poor and the smallest eigenvalues are sometimes around `10e-32`. Currently we consider only FIMs with a smallest eigenvalue $\lambda_{min}$ as too bad conditioned - this might be too generous. However for small inertia values the FIM becomes even worse conditioned during convergence.
 One way to approach this problem could be to use a singular-value decomposition (SVD) of the FIM and filter out too uninformative directions leading to a low rank approximation of the FIM. 
+
+If we do not use the FIM for gradient projection but use naive stochastical gradient descent the mass converges like a charm but the inertia not. If we use the FIM the inertia behaves better but the mass becomes an unstable parameter.
