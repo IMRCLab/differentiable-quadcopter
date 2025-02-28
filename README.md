@@ -79,3 +79,7 @@ The conditioning of the FIM is extremly poor and the smallest eigenvalues are so
 One way to approach this problem could be to use a singular-value decomposition (SVD) of the FIM and filter out too uninformative directions leading to a low rank approximation of the FIM. 
 
 If we do not use the FIM for gradient projection but use naive stochastical gradient descent the mass converges like a charm but the inertia not. If we use the FIM the inertia behaves better but the mass becomes an unstable parameter.
+
+
+### References
+FIM Idea: https://arxiv.org/pdf/1901.07242
